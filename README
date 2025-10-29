@@ -1,0 +1,61 @@
+BasicLine S3 – Intelligent Cooling Controller
+
+BasicLine S3 is a compact and modular controller based on the ESP32-S3 platform.
+It is designed for intelligent cooling, fan regulation, and industrial heat-exchange management.
+The system continuously monitors temperature, pressure, and current sensors to optimize performance, efficiency, and safety in demanding environments.
+
+🔧 Key Features
+
+Dual-core ESP32-S3 MCU with Wi-Fi and Modbus-TCP communication
+
+Multi-fan PWM control with adaptive ΔT-based logic
+
+Support for DS18B20, PT100/PT1000, and pressure sensors
+
+Built-in diagnostics, fault detection, and watchdog protection
+
+Fully configurable via serial console or future HMI interface
+
+Compact footprint, suitable for embedded or OEM applications
+
+⚙️ Build & Upload
+
+The firmware is developed using PlatformIO (Arduino framework).
+
+# Clone repository
+git clone https://github.com/<yourusername>/BasicLine_S3.git
+cd BasicLine_S3
+
+# Build project
+pio run
+
+# Upload firmware to ESP32-S3
+pio run --target upload
+
+
+Make sure the board type in platformio.ini matches your hardware
+(e.g. esp32-s3-devkitc-1 or LilyGO T-Relay S3).
+
+ Hardware Overview
+Function	Typical Pin	Description
+DS18B20 bus	GPIO 17	Temperature sensor input
+Fan PWM 1–4	GPIO 1–4	Variable speed control
+Relay outputs	GPIO 10–13	Load switching
+RS485 TX/RX	GPIO 16 / 15	Modbus-RTU communication
+Status LED	GPIO 48	System heartbeat
+BOOT button	GPIO 0	Manual firmware upload mode
+
+(Pinout may vary depending on board revision.)
+
+ Project Structure
+BasicLine_S3/
+ ├─ src/               → main firmware source
+ ├─ include/           → headers and configuration files
+ ├─ lib/               → custom libraries
+ ├─ platformio.ini     → build configuration
+ └─ LICENSE             → project license (MIT)
+
+ License
+
+Released under the MIT License
+© 2025 Martin Kuna
