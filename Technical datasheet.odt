@@ -1,0 +1,122 @@
+Technical Datasheet – BasicLine S3 Industrial v1.3.0
+Document version: October 2025
+Author: Martin Kuna
+Firmware compatible with: LILYGO T-Relay S3 Rev 1.1
+
+1. General Information
+BasicLine S3 – Industrial is a compact controller designed for automatic management of compressor coolers, fan arrays, and other industrial cooling systems.
+The unit is based on the ESP32-S3 microcontroller with extended Flash and PSRAM memory and includes integrated Wi-Fi for local web control, data logging, and service diagnostics.
+
+2. Main Features
+Controls up to 6 fans (4 onboard relays + 2 via I?C CHAIN)
+Automatic cascade cooling control according to outlet temperature
+Reverse cycle after compressor start for fin cleaning
+Spray cooling with temperature-based activation
+Fan rotation for balanced wear
+Service timer with notification after 1000 operating hours
+Real-time Cooling Efficiency and Thermal Health Score monitoring
+Optional Power Monitor for electrical power measurement
+Integrated Web interface with JSON API and EEPROM configuration storage
+SD card logging for temperature and system data
+Built-in 10 s watchdog for stable 24/7 operation
+
+3. Technical Specifications
+Parameter
+Value
+Power Supply
+12–24 V DC / max 2 A
+Processor
+ESP32-S3 (N16R8, 240 MHz dual-core)
+Memory
+Flash 16 MB, PSRAM 8 MB
+Relay Outputs
+6× (NO/NC 10 A @ 250 V AC)
+Inputs
+1× COMP_RUN, 3× DS18B20 (Tin, Tout, Tamb)
+Communication
+Wi-Fi AP / Webserver / I?C CHAIN
+Data Logging
+microSD card (FAT32)
+Display
+LCD ST7789 1.9" (240×320 px)
+RTC
+DS3231 I?C (±2 ppm)
+EEPROM
+128 B user configuration
+Watchdog
+10 s software reset
+Dimensions
+70 × 50 × 15 mm
+Operating Temperature
+–20 … +70 °C
+
+4. Logic Outputs and Functions
+Output
+Label
+Function
+R1–R4
+Fan 1–4
+Cascade cooling control
+R5
+Spray
+Spray cooling circuit
+R6
+Reverse
+Reverse cycle during compressor start
+CR1 (CHAIN)
+Unload
+Compressor unloading signal
+CR4 (CHAIN)
+Alarm
+Fault or service indication
+CR2, CR3 (optional)
+Fan 5–6
+Additional fan expansion outputs
+
+5. Sensors and Inputs
+Sensor Type
+Label
+Description
+DS18B20
+Tin / Tout / Tamb
+1-Wire temperature sensors
+COMP_RUN
+Digital input
+Detects compressor operation
+Power Monitor
+Analog input (ADC)
+Measures fan power consumption (optional)
+
+6. Web Interface and Communication
+Wi-Fi Access Point: BasicLine_S3 / 12345678
+Main dashboard: http://192.168.4.1
+Live JSON API: /json
+Configuration endpoint: /setcfg
+Reverse test command: /revtest?ms=5000
+Restore factory defaults: /factoryreset
+
+7. Service and Maintenance
+Log file: /bls3_log.csv
+Error log: /error.log
+Recommended service interval: 1000 operating hours
+Notification: SERVICE DUE when limit is reached
+
+8. QR Links
+Function
+URL
+Dashboard
+http://192.168.4.1
+JSON Data
+http://192.168.4.1/json
+Factory Reset
+http://192.168.4.1/factoryreset
+
+9. Compatibility Note
+This firmware is designed exclusively for the LILYGO T-Relay S3 Rev 1.1 hardware
+and is fully compatible with the standard relay configuration (74HC595 shift register + I?C CHAIN expander).
+
+10. Copyright
+© 2025 Martin Kuna
+All rights reserved.
+Distribution or modification of this document is allowed only with the author’s permission.
+

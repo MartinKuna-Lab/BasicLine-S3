@@ -1,0 +1,122 @@
+Technickı list – BasicLine S3 Industrial v1.3.0
+Verze dokumentu: øíjen 2025
+Autor: Martin Kuna
+Firmware kompatibilní s: LILYGO T-Relay S3 Rev 1.1
+
+1. Základní informace
+BasicLine S3 – Industrial je kompaktní øídicí jednotka pro automatické øízení chladièù kompresorù, ventilátorovıch blokù a dalších prùmyslovıch chladicích zaøízení.
+Jednotka vyuívá mikrokontrolér ESP32-S3 s rozšíøenou pamìtí a podporou Wi-Fi pro lokální webové rozhraní, datové logování a servisní diagnostiku.
+
+2. Hlavní vlastnosti zaøízení
+Øízení a 6 ventilátorù (4 relé na desce + 2 pøes I?C CHAIN)
+Automatická kaskáda vıkonu dle vıstupní teploty
+Reverzní bìh pøi startu kompresoru pro èištìní lamel
+Postøikovı okruh (Spray) s teplotní aktivací
+Rotace vìtví pro rovnomìrné opotøebení ventilátorù
+Servisní èasovaè s upozornìním po 1000 h provozu
+Vıpoèet úèinnosti chlazení (Efficiency) a zdraví systému (Health Score)
+Volitelnı Power Monitor pro mìøení elektrického vıkonu
+Webové rozhraní s ivım JSON API a uloením konfigurace do EEPROM
+SD karta pro záznam provozních a chybovıch logù
+Integrovanı watchdog (10 s) pro zajištìní stability systému
+
+3. Technické parametry
+Parametr
+Hodnota
+Napájení
+12–24 V DC / max 2 A
+Procesor
+ESP32-S3 (N16R8, 240 MHz dual-core)
+Pamì
+Flash 16 MB, PSRAM 8 MB
+Relé vıstupy
+6× (NO/NC 10 A @ 250 V AC)
+Vstupy
+1× COMP_RUN, 3× DS18B20 (Tin, Tout, Tamb)
+Komunikace
+Wi-Fi AP / Webserver / I?C CHAIN
+Záznam dat
+SD karta FAT32
+Displej
+LCD ST7789 1.9" (240×320 px)
+RTC
+DS3231 I?C (±2 ppm)
+EEPROM
+128 B uivatelská konfigurace
+Watchdog
+10 s SW reset
+Rozmìry
+70 × 50 × 15 mm
+Provozní teplota
+–20 … +70 °C
+
+4. Logické vıstupy a funkce
+Vıstup
+Oznaèení
+Funkce
+R1–R4
+Fan 1–4
+Kaskádní chlazení
+R5
+Spray
+Postøikovı okruh
+R6
+Reverse
+Reverzní bìh
+CR1 (CHAIN)
+Unload
+Ovládání odlehèení kompresoru
+CR4 (CHAIN)
+Alarm
+Signalizace poruchy nebo údrby
+CR2, CR3 (volitelnì)
+Fan 5–6
+Rozšíøení ventilátorù
+
+5. Senzory a vstupy
+Typ senzoru
+Oznaèení
+Popis
+DS18B20
+Tin / Tout / Tamb
+Teplotní èidla 1-Wire
+COMP_RUN
+Digitální vstup
+Detekce bìhu kompresoru
+Power Monitor
+Analogovı vstup (ADC)
+Mìøení pøíkonu (volitelnì)
+
+6. Webové rozhraní a komunikace
+Pøístup pøes Wi-Fi AP: BasicLine_S3 / 12345678
+Hlavní dashboard: http://192.168.4.1
+Live data JSON API: /json
+Nastavení teplot: /setcfg
+Servisní reverzní test: /revtest?ms=5000
+Obnovení vıchozí konfigurace: /factoryreset
+
+7. Servis a údrba
+Logovací soubor: /bls3_log.csv
+Chybové hlášky: /error.log
+Doporuèenı servisní interval: 1000 h provozu
+Upozornìní SERVICE DUE pøi dosaení limitu
+
+8. QR odkazy
+Funkce
+Odkaz
+Dashboard
+http://192.168.4.1
+JSON Data
+http://192.168.4.1/json
+Factory Reset
+http://192.168.4.1/factoryreset
+
+9. Poznámka k kompatibilitì
+Tento firmware je urèen vıhradnì pro hardware LILYGO T-Relay S3 Rev 1.1
+a je plnì kompatibilní se standardní konfigurací vıstupních relé 74HC595 + I?C CHAIN expander.
+
+10. Copyright
+© 2025 Martin Kuna
+Všechna práva vyhrazena.
+Distribuce nebo úpravy dokumentu pouze se souhlasem autora.
+
