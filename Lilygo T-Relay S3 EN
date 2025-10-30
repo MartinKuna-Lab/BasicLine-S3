@@ -1,1 +1,103 @@
+Technical Description – LILYGO T-Relay S3 Rev 1.1
 
+Manufacturer: LilyGO (Shenzhen Xin Yuan Electronic Technology Co., Ltd.)
+Platform: ESP32-S3 (Dual-core Xtensa LX7)
+Board Revision: Rev 1.1
+Release Year: 2023
+
+1. General Overview
+
+The LILYGO T-Relay S3 is a development and control board based on the ESP32-S3 microcontroller with 16 MB Flash and 8 MB PSRAM.
+It is designed for applications requiring control of multiple relays, Wi-Fi/Bluetooth connectivity, and simultaneous operation with peripherals such as sensors, SD card, RTC, or LCD display.
+
+The board integrates 6 relay channels driven by a 74HC595 shift register, as well as I²C, SPI, UART, 1-Wire, and optional CHAIN I²C expander support for external modules.
+
+2. Key Features
+Parameter	Specification
+MCU	ESP32-S3 (Xtensa LX7 dual-core, 240 MHz)
+Flash / PSRAM	16 MB / 8 MB
+Power Supply	5–24 V DC (recommended 12 V DC)
+Relay Channels	6 (10 A / 250 V AC)
+Relay Control	74HC595 shift register (DATA, CLOCK, LATCH)
+Connectivity	Wi-Fi 802.11 b/g/n, Bluetooth 5.0
+Interfaces	I²C, SPI, UART, ADC, GPIO, 1-Wire
+SD Card	microSD slot (shared SPI bus)
+RTC Module	DS3231 I²C (optional add-on)
+Display	ST7789 / ST7735 (SPI) – LovyanGFX compatible
+Watchdog	Software watchdog, optional hardware input
+Board Dimensions	85 × 45 × 18 mm
+3. Connector Layout
+Connector	Description
+Relay OUT 1–6	Relay outputs (NO/COM/NC)
+Power Terminal	Board power input (5–24 V DC)
+1-Wire Port (DS18B20)	Data pin with 4.7k pull-up resistor
+I²C (CHAIN)	SDA/SCL bus for expanders or RTC module
+SPI Port	Shared SPI for SD card and LCD display
+UART Header	RX/TX for debugging, Modbus or HMI
+USB-C	Power, programming and serial debug (CP210x)
+BOOT / RESET Buttons	Used for flashing firmware
+4. Relay Architecture
+
+The six relays are controlled serially via a 74HC595 shift register:
+
+Data, Clock, and Latch pins are connected to ESP32-S3 GPIOs.
+
+Relay coils are powered by an independent 12 V circuit, isolated from logic voltage.
+
+Each relay has an onboard LED status indicator.
+
+This design minimizes GPIO usage and allows expansion through the CHAIN I²C interface, where additional relay modules can be connected in sequence.
+
+5. Expansion Options
+
+CHAIN (I²C) port – connect up to 3 additional expansion modules (relay or MOSFET boards).
+
+Power Monitor / ADC – measure voltage or current via INA219 or ACS758.
+
+External Display (ST7789/ST7735) – for system visualization or HMI functions.
+
+SD Card – logging of operational data and errors.
+
+RTC DS3231 – for precise time-stamped logging.
+
+External watchdog or opto-isolated inputs – for safety-critical systems.
+
+6. Use in the BasicLine Project
+
+The T-Relay S3 Rev 1.1 board serves as the primary hardware platform for the BasicLine S3 – Industrial controller.
+It provides:
+
+direct connection of 3 × DS18B20 sensors,
+
+control of fans, spray circuit, and reverse operation,
+
+expansion via CHAIN interface,
+
+data display on the integrated LCD,
+
+full control via Wi-Fi and JSON web interface.
+
+7. Installation Recommendations
+
+Supply the board from a stable 12 V DC source (min. 2 A).
+
+Isolate high-voltage outputs from logic signals.
+
+Use shielded cables for DS18B20 and I²C lines in industrial environments.
+
+Format SD cards as FAT32 before use.
+
+For inductive loads, use RC snubbers or varistors on relay outputs.
+
+8. Summary
+
+The LILYGO T-Relay S3 Rev 1.1 is a reliable and versatile platform for industrial and automation projects.
+Combining a powerful ESP32-S3 processor, integrated relay module, and multiple interface options, it provides an excellent foundation for:
+
+intelligent cooling controllers,
+
+heating systems,
+
+automation and control units,
+
+monitoring or test equipment.
