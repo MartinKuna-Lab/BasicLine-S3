@@ -1,0 +1,145 @@
+Popis zaøízení a funkèní specifikace – BasicLine S3 Industrial v1.3.0
+Verze dokumentu: øíjen 2025
+Autor: Martin Kuna
+Firmware kompatibilní s: LILYGO T-Relay S3 Rev 1.1
+
+1. Úèel zaøízení
+Jednotka BasicLine S3 – Industrial je urèena pro øízení chladicích okruhù kompresorù, ventilátorových radiátorù a prùmyslových výmìníkù tepla.
+Zaøízení umožòuje øízení výkonu v nìkolika stupních, zajišuje reverzní èištìní lamel, automatický postøik a dohlíží na úèinnost systému v reálném èase.
+Firmware verze v1.3.0 pøináší zvýšenou stabilitu, diagnostiku, servisní upozornìní a možnost rozšíøení o mìøení pøíkonu.
+
+2. Hlavní funkèní bloky
+Blok
+Popis funkce
+Øízení ventilátorù (R1–R4)
+Kaskádní zapínání ventilátorù dle výstupní teploty (Tout). Každý stupeò odpovídá zvýšení teploty o násobek hystereze.
+Rotace vìtví
+Každou hodinu mìní poøadí aktivních relé (1–3) pro rovnomìrné opotøebení ventilátorù.
+Reverzní cyklus
+Aktivuje relé R6 pøi startu kompresoru (COMP_RUN) na 5 s, pokud nejsou aktivní ochrany nebo postøik.
+Postøikový okruh (Spray)
+Aktivuje relé R5 pøi pøekroèení teploty T_SPRAY, dokud Tout neklesne pod T_OFF.
+Servisní èasovaè
+Po dosažení 1000 hodin aktivního provozu zobrazí hlášení SERVICE DUE.
+Výpoèet úèinnosti
+Úèinnost = (Tout – Tin) / 20 × 100 %. Slouží jako indikátor pøenosu tepla.
+Thermal Health Score
+Kombinuje úèinnost, teplotní stabilitu a stav senzorù. Hodnota 100 % znamená plnì funkèní systém.
+Watchdog
+Obnovuje systém pøi zablokování hlavního procesu (neaktivita nad 10 s).
+EEPROM ochrana (dirty commit)
+Konfigurace se ukládá pouze pøi zmìnì hodnot, èímž se minimalizuje opotøebení pamìti.
+
+3. Senzorika a diagnostika
+Zaøízení využívá tøi èidla DS18B20:
+Oznaèení
+Umístìní
+Funkce
+Tin
+Vstupní médium (napø. nasávaný vzduch nebo kapalina)
+Referenèní teplota
+Tout
+Výstupní médium (za chladièem)
+Øídicí velièina
+Tamb
+Okolní teplota
+Korekce úèinnosti
+Pokud dojde k odpojení èidla (DS18B20 vrací -127 °C), je jeho hodnota automaticky vyøazena z výpoètù a vyvolán alarm SENSOR FAIL.
+
+4. Logika øízení
+4.1. Režim AUTO
+Základní provozní režim.
+Regulace probíhá podle hodnoty Tout:
+Tout ? T_ON ? zapnutí chlazení
+Tout ? T_OFF ? vypnutí chlazení
+Mezi tìmito hodnotami se aktivují stupnì výkonu podle hystereze.
+Poøadí ventilátorù se automaticky støídá dle indexu uloženého v EEPROM.
+4.2. Režim SERVICE
+Testovací režim urèený pro montéry nebo servis.
+Jednotka postupnì zapíná všechny výstupy (R1–R6, CHAIN výstupy), aby bylo možné ovìøit správnou funkci pøipojených komponent.
+4.3. Režim WIZARD
+Sekvenèní diagnostika výstupù – každý výstup se zapne na 1,5 s a následnì vypne.
+Po dokonèení všech testù pøechází systém zpìt do režimu AUTO.
+4.4. Režim LOCKOUT
+Bezpeènostní stav – deaktivace všech výstupù v pøípadì poruchy senzorù, napájení nebo watchdog resetu.
+
+5. Komunikaèní rozhraní
+Wi-Fi pøipojení
+Po zapnutí se vytvoøí pøístupový bod:
+SSID: BasicLine_S3
+Heslo: 12345678
+Pøístup pøes: http://192.168.4.1
+Webové rozhraní
+Dashboard: zobrazení aktuálních teplot, režimu a výstupù
+Nastavení: úprava T_ON, T_OFF, T_SPRAY, HYST, Power Monitor
+/json: pøímý pøístup k hodnotám ve formátu JSON
+/revtest?ms=5000: test reverzního bìhu
+/factoryreset: vymazání nastavení a restart
+
+6. Rozšiøitelnost systému
+Firmware umožòuje pøipojit další periferie a moduly bez zásahu do základní logiky:
+Rozšíøení
+Popis
+Možný pin / sbìrnice
+Power Monitor
+Mìøení proudu a napìtí pomocí INA219 / ACS758
+I?C nebo ADC vstup
+?p senzor
+Mìøení tlakové ztráty výmìníku
+ADC vstup
+Externí Modbus pøevodník
+Pøipojení k PLC nebo SCADA
+UART (TX/RX)
+Ethernet modul (LAN8720)
+Pøipojení k síti LAN
+RMII rozhraní ESP32-S3
+Externí displej
+Zrcadlení dat na vzdálený HMI
+UART/I?C
+Rozšíøení CHAIN
+Další relé pøes I?C expander
+CHAIN 0x31–0x33
+
+7. Ochrany a alarmy
+Událost
+Popis
+Akce systému
+Tout missing
+Ztráta hlavního senzoru
+Pøechod do režimu LOCKOUT
+Sensor fail
+Neplatná data z DS18B20
+Alarm + blokace výstupù
+Spray active
+Postøik aktivní – zákaz reverzu
+Ochrana ventilátorù
+SERVICE DUE
+Pøekroèen servisní interval
+Signalizace na LCD a Alarm výstupu
+Watchdog reset
+Systém nereaguje >10 s
+Automatický restart
+
+8. Možnosti pøizpùsobení firmware
+Firmware lze upravit dle požadavkù koncového zaøízení:
+Zmìna délky reverzu (500–15000 ms)
+Volitelná perioda rotace ventilátorù
+Pøedefinování výstupù (napø. R5 ? ventilátor, R6 ? odvod kondenzátu)
+Úprava logování (frekvence, formát CSV)
+Integrace Modbus protokolu (slave/master režim)
+Aktivace MQTT klienta pro vzdálený dohled
+
+9. Diagnostika a servisní nástroje
+LCD indikace: teploty, úèinnost, health score, režim
+/json API: kompletní výpis všech hodnot
+SD log: každou minutu zaznamenává Tin, Tout, Tamb, úèinnost a stavy výstupù
+Error log: zaznamenává všechny chybové stavy a výpadky senzorù
+Factory Reset: plné obnovení výchozí konfigurace
+
+10. Shrnutí
+BasicLine S3 Industrial pøedstavuje robustní, servisovatelný a rozšiøitelný systém pro automatické øízení prùmyslových chladièù s dùrazem na:
+vysokou spolehlivost,
+jednoduchou obsluhu,
+prediktivní diagnostiku,
+a možnost budoucí integrace do nadøazených systémù.
+
