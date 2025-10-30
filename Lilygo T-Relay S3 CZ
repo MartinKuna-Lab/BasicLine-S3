@@ -1,0 +1,102 @@
+Technický popis – LILYGO T-Relay S3 Rev 1.1
+
+Výrobce: LilyGO (Shenzhen Xin Yuan Electronic Technology Co., Ltd.)
+Platforma: ESP32-S3 (Dual-core Xtensa LX7)
+Verze desky: Rev 1.1
+Datum vydání: 2023
+
+1. Obecná charakteristika
+
+LILYGO T-Relay S3 je vývojová deska založená na mikrokontroléru ESP32-S3 s 16 MB Flash a 8 MB PSRAM, určená pro aplikace, které vyžadují řízení více relé, komunikaci přes Wi-Fi/Bluetooth a současně práci s periferiemi, jako jsou senzory, SD karta, RTC nebo LCD displej.
+
+Deska integruje 6 kanálů relé řízených přes 74HC595 posuvný registr, rozhraní I²C, SPI, 1-Wire, a možnost napojení externího CHAIN expanderu pro další relé nebo moduly.
+
+2. Hlavní vlastnosti
+Parametr	Hodnota
+MCU	ESP32-S3 (Xtensa LX7 dual-core, 240 MHz)
+Flash / PSRAM	16 MB / 8 MB
+Napájení	5–24 V DC (doporučeno 12 V DC)
+Počet relé	6 (10 A / 250 V AC)
+Logika relé	Řízená přes 74HC595 (bit-shift register)
+Komunikace	Wi-Fi 802.11 b/g/n, Bluetooth 5.0
+Rozhraní	I²C, SPI, UART, ADC, GPIO, 1-Wire
+SD karta	microSD slot (SPI sdílené)
+RTC	DS3231 (I²C) – připojitelný modul
+LCD	ST7789 / ST7735 (SPI) – kompatibilní s LovyanGFX
+Watchdog	Softwarový, možno aktivovat i HW pinem
+Rozměry	85 × 45 × 18 mm
+3. Rozložení konektorů
+Konektor	Funkce
+Relay OUT 1–6	Výstupy relé (NO/COM/NC)
+Screw Terminal Power	Napájení desky (5–24 V DC)
+1-Wire Port (DS18B20)	Datový pin s pull-up odporem 4k7
+I²C (CHAIN)	SDA/SCL pro připojení expanderů nebo RTC
+SPI Port	Sdílené rozhraní pro SD kartu a LCD displej
+UART	RX/TX – ladění, Modbus, komunikace s HMI
+USB-C	Napájení, programování, debug (CP210x)
+BOOT / RESET	Tlačítka pro flashování firmware
+4. Architektura relé
+
+Relé jsou ovládána sériově přes 74HC595 posuvný registr:
+
+Data, Clock a Latch piny (DATA, CLK, LATCH) jsou vyvedeny na ESP32-S3 GPIO.
+
+Relé jsou napájena samostatným 12V okruhem (odděleným od logiky).
+
+Každé relé má LED indikaci aktivace.
+
+Tento způsob řízení umožňuje výrazně snížit počet potřebných GPIO pinů a umožňuje řetězení více relé modulů přes CHAIN (I²C expandér).
+
+5. Možnosti rozšíření
+
+CHAIN port (I²C) – umožňuje připojit až 3 další expanzní moduly s relé nebo tranzistory.
+
+Power Monitor / ADC – měření napětí nebo proudu (např. INA219, ACS758).
+
+Externí displej (ST7789, ST7735) – zobrazení provozních dat.
+
+SD karta – logování provozních hodnot a chyb.
+
+RTC DS3231 – přesné časové značky logů.
+
+Externí watchdog nebo optické vstupy – pro bezpečnostní aplikace.
+
+6. Použití v projektu BasicLine
+
+Deska T-Relay S3 Rev 1.1 slouží jako základní hardware platforma pro systém BasicLine S3 – Industrial.
+Umožňuje:
+
+přímé připojení 3 teplotních čidel DS18B20,
+
+ovládání ventilátorů, postřiku a reverzního běhu,
+
+rozšíření výstupů přes CHAIN,
+
+zobrazení provozních dat na displeji,
+
+komunikaci přes Wi-Fi web rozhraní a JSON API.
+
+7. Doporučení pro montáž
+
+Napájení přiveďte stabilizovaným zdrojem 12 V DC (min. 2 A).
+
+Vstupy a výstupy s vysokým napětím galvanicky oddělte.
+
+Používejte stíněné vodiče pro teplotní senzory a komunikaci I²C.
+
+Při použití SD karty doporučeno formátování FAT32.
+
+Relé s induktivní zátěží chraňte RC členem nebo varistorem.
+
+8. Shrnutí
+
+LILYGO T-Relay S3 Rev 1.1 je univerzální, stabilní a dobře vybavená platforma pro průmyslové aplikace.
+Díky kombinaci výkonného ESP32-S3, integrovaných relé a otevřeného rozhraní poskytuje ideální základ pro projekty typu:
+
+inteligentní chladiče,
+
+topné systémy,
+
+automatizace provozů,
+
+diagnostika a testovací stanice.
