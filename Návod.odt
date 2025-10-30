@@ -1,0 +1,213 @@
+BasicLine S3 – Industrial v1.3.0
+Uivatelskı a servisní manuál – øíjen 2025
+Firmware compatible with LILYGO T-Relay S3 Rev 1.1
+© 2025 Martin Kuna
+
+Seznam kapitol
+1. Úvod
+2. Popis zaøízení
+3. Bezpeènost
+4. Displej a rozhraní
+5. Základní konfigurace
+6. Funkce systému
+7. Servisní reimy
+8. Údrba a diagnostika
+9. Technické parametry
+10. Schéma zapojení
+11. QR odkazy
+12. Copyright a verze
+
+1. Úvod
+BasicLine S3 – Industrial je inteligentní øídicí jednotka urèená pro øízení prùmyslovıch chladièù kompresorù.
+Øídí a 6 ventilátorù, postøikové chlazení, reverzní bìh a sleduje úèinnost i technické zdraví systému.
+Firmware verze v1.3.0 pøináší kompletní diagnostiku, webové rozhraní, logování a watchdog pro nepøetritı provoz.
+
+
+
+2. Popis zaøízení
+Prvek
+Funkce
+Popis
+ESP32-S3 (T-Relay S3)
+Hlavní procesor
+16 MB Flash, 8 MB PSRAM
+Relé R1–R4
+Ventilátory 1–4
+Kaskádní øízení, rotace po 1 hodinì
+Relé R5
+Spray
+Aktivace postøiku chladièe
+Relé R6
+Reverse
+Reverzní bìh po startu kompresoru
+CHAIN I?C expander
+CR1–CR4
+Unload, Alarm, Fan5–6
+DS18B20
+Tin / Tout / Tamb
+Mìøení teplot
+RTC DS3231
+Hodiny reálného èasu
+Pouívá se pro èasové logy
+SD slot
+Logování dat
+CSV log + error log
+LCD ST7789
+Displej 1.9"
+Zobrazuje provozní hodnoty
+Power Monitor (volitelnì)
+Mìøení vıkonu
+Pomocí ADC nebo modulu INA219
+
+3. Bezpeènost
+Dùleité pokyny pro instalaci a provoz:
+Napájejte napìtím 12–24 V DC s jištìním.
+Relé jsou urèena pro maximálnì 250 V AC / 10 A.
+Pøed manipulací vdy vypnìte napájení.
+Teplotní èidla montujte s tepelnou vazbou a pastou.
+Nepøipojujte síové napìtí pøímo na signálové vstupy.
+Webové rozhraní nevyaduje pøístup k internetu.
+Funkce Factory Reset obnoví všechna vıchozí nastavení.
+
+
+
+4. Displej a rozhraní
+Na displeji se støídavì zobrazují provozní informace:
+Tin: 31.2 °C
+Tout: 36.7 °C
+Eff: 78.4 %
+Health: 95.0 %
+Srv(min): 2450
+Mode: AUTO
+Vıznam indikátorù:
+F1–F4 – aktivní ventilátory
+SP – aktivní postøik
+RV – reverzní bìh
+UL – vıstup Unload
+AL – aktivní alarm nebo servisní upozornìní
+
+5. Základní konfigurace
+1. Zapnìte zaøízení – vytvoøí se Wi-Fi sí:
+SSID: BasicLine_S3
+Heslo: 12345678
+2. Otevøete webovı prohlíeè a pøejdìte na adresu:
+http://192.168.4.1
+3. V sekci Nastavení upravte parametry:
+T_ON – teplota, pøi které se chlazení zapne
+T_OFF – teplota vypnutí
+T_SPRAY – aktivace postøiku
+HYST – krok hystereze mezi stupni
+Power Monitor – zapnutí nebo vypnutí mìøení vıkonu
+4. Stisknìte Uloit – hodnoty se validují a uloí do pamìti EEPROM.
+
+
+6. Funkce systému
+Funkce
+Popis
+Automatická kaskáda ventilátorù
+Aktivace ventilátorù dle teploty Tout.
+Rotace ventilátorù
+Kadou hodinu mìní poøadí aktivních vìtví (1–3).
+Reverzní bìh
+Pøi startu kompresoru aktivuje 5 s reverzní cyklus.
+Postøik (Spray)
+Aktivuje relé R5 pøi pøekroèení T_SPRAY.
+Thermal Health Score
+Vıpoèet technického zdraví systému v %.
+Service Timer
+Po 1000 h provozu zobrazuje hlášku SERVICE DUE.
+Power Monitor
+Mìøí elektrickı pøíkon ventilátorù.
+Watchdog
+Reset systému pøi zablokování (10 s).
+Dirty EEPROM commit
+Ukládá zmìny jen pøi úpravách, šetøí pamì.
+
+7. Servisní reimy
+Reim
+Popis
+Aktivace
+SERVICE
+Test všech vıstupù R1–R6 a CHAIN
+Reim Service v menu
+Reverzní test
+Spuštìní reverzu na zadanou dobu
+/revtest?ms=5000
+Factory reset
+Vymazání EEPROM a restart
+/factoryreset
+
+8. Údrba a diagnostika
+Logy CSV: /bls3_log.csv
+Chybové hlášky: /error.log
+API: /json – zobrazuje aktuální data v reálném èase
+Hlášení poruch:
+Tout missing – vıpadek senzoru
+SERVICE DUE – nutná údrba
+Sensor fail – neplatná data z èidel
+Vıchozí hodnoty po Factory Reset:
+Parametr
+Hodnota
+T_ON
+35 °C
+T_OFF
+32 °C
+T_SPRAY
+48 °C
+HYST
+3 °C
+Power Monitor
+Vypnuto
+
+9. Technické parametry
+Parametr
+Hodnota
+Napájení
+12–24 V DC / max 2 A
+Procesor
+ESP32-S3 (240 MHz)
+Relé vıstupy
+6× NO/NC 10 A / 250 V AC
+Teplotní senzory
+DS18B20 (Tin, Tout, Tamb)
+LCD
+ST7789 1.9" 240×320
+SD karta
+microSD FAT32
+RTC
+DS3231 I?C
+Komunikace
+Wi-Fi AP / Webserver
+Watchdog
+10 s reset
+EEPROM
+128 B uivatelská konfigurace
+Rozmìry
+70 × 50 × 15 mm
+
+10. Schéma zapojení (blokové)
+ESP32-S3 (T-Relay S3)
+? Relé R1–R4 – ventilátory
+? Relé R5 – spray
+? Relé R6 – reverse
+? 1-Wire – Tin/Tout/Tamb
+? I?C CHAIN – Unload/Alarm
+? ADC vstup – Power Monitor (volitelné)
+? SD / RTC / LCD – spoleèné SPI/I?C
+
+11. QR odkazy
+Funkce
+URL
+Dashboard
+http://192.168.4.1
+JSON Live Data
+http://192.168.4.1/json
+Factory Reset
+http://192.168.4.1/factoryreset
+
+12. Copyright a verze
+BasicLine S3 – Industrial v1.3.0
+© 2025 Martin Kuna
+Všechna práva vyhrazena.
+Firmware compatible with LILYGO T-Relay S3 Rev 1.1
+

@@ -1,0 +1,216 @@
+BasicLine S3 – Industrial v1.3.0
+User and Service Manual – October 2025
+Firmware compatible with LILYGO T-Relay S3 Rev 1.1
+© 2025 Martin Kuna
+
+Table of Contents
+1. Introduction
+2. Device Overview
+3. Safety Information
+4. Display and Interface
+5. Basic Configuration
+6. System Functions
+7. Service Modes
+8. Maintenance and Diagnostics
+9. Technical Specifications
+10. Wiring Diagram
+11. QR Links
+12. Copyright and Version
+
+1. Introduction
+The BasicLine S3 – Industrial is an intelligent controller designed for industrial compressor cooling systems.
+It controls up to six fans, a spray cooling system, and a reverse cycle for lamella cleaning, while monitoring efficiency and system health.
+Firmware version v1.3.0 adds full diagnostics, web interface, data logging, and a watchdog for continuous operation.
+
+
+
+2. Device Overview
+Component
+Function
+Description
+ESP32-S3 (T-Relay S3)
+Main processor
+16 MB Flash, 8 MB PSRAM
+Relays R1–R4
+Fans 1–4
+Cascade control with hourly rotation
+Relay R5
+Spray
+Activates the spray cooling system
+Relay R6
+Reverse
+Reverse cycle at compressor start
+CHAIN I?C expander
+CR1–CR4
+Unload, Alarm, Fan5–6
+DS18B20
+Tin / Tout / Tamb
+Temperature sensors
+RTC DS3231
+Real-time clock
+Used for time-stamped logs
+SD slot
+Data logging
+CSV log + error log
+LCD ST7789
+1.9" display
+Shows operating parameters
+Power Monitor (optional)
+Power measurement
+Via ADC or INA219 module
+
+3. Safety Information
+Important installation and operating notes:
+Power supply 12–24 V DC with fuse protection.
+Relay contacts rated for max. 250 V AC / 10 A.
+Always disconnect power before servicing.
+Install temperature sensors with thermal paste.
+Do not connect mains voltage to signal inputs.
+Web interface does not require Internet access.
+Factory Reset restores default configuration.
+
+
+
+4. Display and Interface
+Typical display example:
+Tin: 31.2 °C
+Tout: 36.7 °C
+Eff: 78.4 %
+Health: 95.0 %
+Srv(min): 2450
+Mode: AUTO
+Indicator meanings:
+F1–F4 – active fans
+SP – spray active
+RV – reverse cycle running
+UL – Unload output active
+AL – alarm or service warning active
+
+5. Basic Configuration
+1. Power on the device – a Wi-Fi network will be created:
+ SSID: BasicLine_S3
+ Password: 12345678
+2. Open a web browser and navigate to:
+ http://192.168.4.1
+3. In the Settings section, adjust the following parameters:
+ – T_ON – temperature to start cooling
+ – T_OFF – temperature to stop cooling
+ – T_SPRAY – spray activation temperature
+ – HYST – stage hysteresis step
+ – Power Monitor – enable or disable power measurement
+4. Click Save – values are validated and written to EEPROM.
+
+
+
+6. System Functions
+Function
+Description
+Automatic fan cascade
+Activates fans stepwise according to Tout temperature.
+Fan rotation
+Changes active branches every hour (1–3).
+Reverse cycle
+Runs a 5 s reverse after compressor start.
+Spray control
+Activates relay R5 above T_SPRAY.
+Thermal Health Score
+Calculates system performance (0–100 %).
+Service Timer
+Displays SERVICE DUE after 1000 operating hours.
+Power Monitor
+Measures fan power input.
+Watchdog
+Resets system after 10 s of no response.
+Dirty EEPROM commit
+Writes changes only when updated, extends EEPROM life.
+
+7. Service Modes
+Mode
+Description
+Activation
+SERVICE
+Tests all outputs R1–R6 and CHAIN lines
+From Service menu
+Reverse Test
+Manual reverse pulse for a defined duration
+/revtest?ms=5000
+Factory Reset
+Clears EEPROM and restarts device
+/factoryreset
+
+
+
+8. Maintenance and Diagnostics
+CSV logs: /bls3_log.csv
+Error log: /error.log
+API: /json – real-time data overview
+Error messages:
+Tout missing – temperature sensor not detected
+SERVICE DUE – service interval reached
+Sensor fail – invalid temperature reading
+Default values after Factory Reset:
+Parameter
+Default Value
+T_ON
+35 °C
+T_OFF
+32 °C
+T_SPRAY
+48 °C
+HYST
+3 °C
+Power Monitor
+Disabled
+
+9. Technical Specifications
+Parameter
+Value
+Power Supply
+12–24 V DC / max 2 A
+Processor
+ESP32-S3 (240 MHz)
+Relay Outputs
+6 × NO/NC 10 A @ 250 V AC
+Temperature Sensors
+DS18B20 (Tin, Tout, Tamb)
+LCD
+ST7789 1.9" 240 × 320
+SD Card
+microSD FAT32
+RTC
+DS3231 I?C
+Communication
+Wi-Fi AP / Webserver
+Watchdog
+10 s reset
+EEPROM
+128 B user configuration
+Dimensions
+70 × 50 × 15 mm
+
+
+10. Wiring Diagram (Conceptual)
+ESP32-S3 (T-Relay S3) ? Relays R1–R4 ? Fans
+Relay R5 ? Spray
+Relay R6 ? Reverse
+1-Wire ? Tin / Tout / Tamb
+I?C CHAIN ? Unload / Alarm
+ADC input ? Power Monitor (optional)
+SD / RTC / LCD share SPI and I?C bus
+
+11. QR Links
+Function
+URL
+Dashboard
+http://192.168.4.1
+JSON Live Data
+http://192.168.4.1/json
+Factory Reset
+http://192.168.4.1/factoryreset
+
+12. Copyright and Version
+BasicLine S3 – Industrial v1.3.0
+© 2025 Martin Kuna
+All rights reserved.
+Firmware compatible with LILYGO T-Relay S3 Rev 1.1
+
