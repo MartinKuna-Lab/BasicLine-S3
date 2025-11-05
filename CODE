@@ -1,15 +1,56 @@
 /*******************************************************
- * BasicLine S3 – Industrial v1.3.9
- * v1.3.8 baseline + elegantní WebUI (rotující ventilátor)
+ *  Project:  BasicLine S3 — Industrial Control System
+ *  Version:  v1.3.9 FULL (STABLE BUILD 2025-11-05)
+ *  Platform: ESP32-S3 DevKit / LilyGO T-Relay S3 v1.1
+ *  Author:   Martin Kuna / OptiTherm Division
  *
- * MANUAL SafetyLock:
- *  - PREPARE_REVERSE: 30s po vypnutí fanů před zapnutím Reverse
- *  - POST_REVERSE   : 30s po vypnutí Reverse, fan ON blokován
- *  - POST_FANS      : 30s po ručním vypnutí všech fanů, Reverse i fan ON blokován
+ *  🔧 SYSTEM OVERVIEW
+ *  • Kompletní řídicí systém chlazení a reverzace pro průmyslové kompresory  
+ *  • 4 hlavní ventilátory + 1 reverzní + 1 spray ventil  
+ *  • Režimy: AUTO / MANUAL / SERVICE / LOCKOUT / WIZARD  
+ *  • I²C CHAIN expander pro rozšíření výstupů (UL/AL)  
+ *  • SafetyLock automaticky zajišťuje prodlevy a blokace:
+ *      – PREPARE_REVERSE : 30 s po vypnutí ventilátorů před reverzem  
+ *      – POST_REVERSE   : 30 s po vypnutí reverzu (ventilátory blokovány)  
+ *      – POST_FANS      : 30 s po ručním vypnutí všech ventilátorů  
+ *  • Automatická rotace ventilátorů každou 1 h (rovnoměrné zatížení)
  *
- * JSON: SafetyLockActive, SafetyLockMS, SafetyPhase
- * WEB : elegantní Settings, SafetyLock banner, KPI, Fan monitor, grafy (včetně U*)
+ *  💾 DATA & SENSORS
+ *  • 3× DS18B20 teplotní senzory (Tin, Tout, Tamb)  
+ *  • ACS712-20A — měření agregovaného proudu ventilátorů  
+ *  • ZMPT110B — měření napětí L1/L2/L3 (3f diagnostika)  
+ *  • RTC DS3231 — časová značka pro logování na SD kartu  
+ *  • EEPROM — uložení konfigurace a počítadla servisních minut  
+ *  • SD karta — CSV log + error log v reálném čase
+ *
+ *  📶 WEB INTERFACE (AsyncWebServer)
+ *  • Moderní grafické WebUI v režimu AP (SSID BasicLine_S3)  
+ *  • Živá data: Tin, Tout, Tamb, Eff, I_RMS, PWR, U_L1/L2/L3/AVG  
+ *  • Grafy (canvas) v reálném čase — Eff, Teploty, I_RMS, PWR, U_*  
+ *  • Ruční ovládání FAN, SPRAY a REVERSE v MANUAL režimu  
+ *  • Konfigurační panel (Settings): T_ON, T_OFF, T_SPRAY, HYST, Power Monitor  
+ *  • Status bannery: SafetyLock (časový odpočet) + LOCKOUT varování  
+ *  • Elegantní SVG logo rotujícího ventilátoru + kompaktní dark design
+ *
+ *  🖥️ LCD INTERFACE (LovyanGFX / ST7789)
+ *  • Banner: "BasicLine S3 — Industrial Control"  
+ *  • Zobrazuje: Mode, Tin, Tout, Tamb, dT/dt, Eff, I_RMS, PWR, U_L1-L3  
+ *  • Ikonový řádek výstupů F1–F4, SP, RV, UL, AL  
+ *  • Barevné indikace stavů a reverzní hlášení (REVERSE ACTIVE)
+ *
+ *  ⚙️ LOGIKA & DIAGNOSTIKA
+ *  • Detekce poruchy ventilátorů (LOW / OVERLOAD přes ACS712)  
+ *  • Servisní počítadlo motohodin ventilátorů (ServiceMinutes)  
+ *  • Watchdog (10 s) – zaručená stabilita běhu ESP32-S3  
+ *  • Factory Reset / Unlock LOCKOUT / ruční vypnutí SafetyLock  
+ *  • EEPROM commit každých 10 s pro minimální opotřebení
+ *
+ *  ✅ STAV
+ *  • Verze v1.3.9 FULL je plně stabilní a ověřená na HW T-Relay S3 v1.1  
+ *  • Funguje s plnou grafickou WebUI i LCD indikací  
+ *  • Označena jako „STABLE PUBLIC BUILD“ pro zveřejnění a dokumentaci
  *******************************************************/
+
 
 #include <Arduino.h>
 #include <Wire.h>
