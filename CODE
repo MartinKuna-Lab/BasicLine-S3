@@ -53,6 +53,63 @@
  *******************************************************/
 
 
+/*******************************************************
+ *  Project:  BasicLine S3 — Industrial Controller
+ *  Version:  v1.3.9 FULL STABLE (build 2025-11-05)
+ *  Platform: ESP32-S3 DevKit / LilyGO T-Relay S3 v1.1
+ *  Author:   Martin Kuna / OptiTherm Division
+ *
+ *  🔧 SYSTEM OVERVIEW
+ *  • Intelligent control system for industrial compressor cooling  
+ *    based on the BasicLine S3 hardware platform  
+ *  • 4 main fans + 1 reverse + 1 spray branch  
+ *  • Automatic / Service / Manual operating modes  
+ *  • I²C CHAIN expander for extended relay outputs  
+ *  • SafetyLock – timed protection delays for reverse operation:  
+ *     – PREPARE_REVERSE  = 30 s after fan stop  
+ *     – POST_REVERSE     = 30 s after reverse off  
+ *     – POST_FANS        = 30 s after all fans manually stopped  
+ *  • Automatic fan rotation every 1 hour to balance wear
+ *
+ *  💾 SENSORS & DATA ACQUISITION
+ *  • 3 × DS18B20 – temperature probes Tin, Tout, Tamb  
+ *  • ACS712-20A – aggregate fan current monitoring  
+ *  • ZMPT110B × 3 – phase voltage L1/L2/L3 (+ U_AVG)  
+ *  • DS3231 RTC – timestamping of log records  
+ *  • SD card – CSV data logging + error log storage  
+ *  • EEPROM – persistent configuration + service minute counter
+ *
+ *  📶 WEB INTERFACE (ESPAsyncWebServer)
+ *  • Elegant dark-mode WebUI with animated SVG fan logo  
+ *  • Mode switching: AUTO ↔ MANUAL  with direct FAN, SPRAY, REVERSE control  
+ *  • Real-time dashboard: Tin, Tout, Tamb, Eff, I_RMS, PWR, U_AVG  
+ *  • Settings panel: T_ON, T_OFF, T_SPRAY, HYST, Power Monitor enable  
+ *  • Visual SafetyLock status with countdown and Lockout indicator  
+ *  • Nine canvas charts (Eff, Tin, Tout, Tamb, I_RMS, PWR, U_L1, U_L2, U_L3 + U_AVG)  
+ *  • Fully asynchronous 1 Hz data refresh without page reload
+ *
+ *  🖥️ LCD INTERFACE (LovyanGFX / ST7789)
+ *  • Top banner: "BasicLine S3 — Industrial Control"  
+ *  • Displays key values and state icons (F1–F4, SP, RV, UL, AL)  
+ *  • Clean layout optimized for readability and low CPU usage
+ *
+ *  ⚙️ LOGIC & DIAGNOSTICS
+ *  • Multi-stage fan control based on Tout temperature  
+ *  • Overcurrent and no-current protection (ACS diagnostics)  
+ *  • Service minute counter active while fans/spray run  
+ *  • Automatic reverse pulse triggered after compressor start  
+ *  • 10 s watchdog reset for fail-safe operation  
+ *  • Full SafetyLock integration and remote unlock via WebUI
+ *
+ *  ✅ RELEASE STATUS
+ *  • BasicLine S3 v1.3.9 FULL = Stable production release  
+ *  • Verified on LilyGO T-Relay S3 rev 1.1 (ESP32-S3 N16R8)  
+ *  • Stable operation of WebUI + LCD with no freezes or lags  
+ *  • Fully compliant with BasicLine S3 Industrial documentation v1.3.x
+ *******************************************************/
+
+
+
 
 #include <Arduino.h>
 #include <Wire.h>
