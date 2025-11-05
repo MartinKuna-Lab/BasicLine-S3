@@ -1,1 +1,1514 @@
+/*******************************************************
+ * BasicLine S3 – Industrial v1.3.9
+ * v1.3.8 baseline + elegantní WebUI (rotující ventilátor)
+ *
+ * MANUAL SafetyLock:
+ *  - PREPARE_REVERSE: 30s po vypnutí fanů před zapnutím Reverse
+ *  - POST_REVERSE   : 30s po vypnutí Reverse, fan ON blokován
+ *  - POST_FANS      : 30s po ručním vypnutí všech fanů, Reverse i fan ON blokován
+ *
+ * JSON: SafetyLockActive, SafetyLockMS, SafetyPhase
+ * WEB : elegantní Settings, SafetyLock banner, KPI, Fan monitor, grafy (včetně U*)
+ *******************************************************/
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <SPI.h>
+#include <WiFi.h>
+#include "esp_wifi.h"
+#include <ESPAsyncWebServer.h>
+#include <AsyncTCP.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <ArduinoJson.h>
+#include <RTClib.h>
+#include <SD.h>
+#include <EEPROM.h>
+#include <LovyanGFX.hpp>
+#include "esp_task_wdt.h"
+#include "esp_system.h"
+
+/* ================== LOG LEVEL ================== */
+#ifndef LOG_LEVEL
+#define LOG_LEVEL 3
+#endif
+#define LOG(lvl, msg)        do{ if((lvl)<=LOG_LEVEL){ Serial.println(msg);} }while(0)
+#define LOGF(lvl, fmt, ...)  do{ if((lvl)<=LOG_LEVEL){ Serial.printf(fmt "\n", ##__VA_ARGS__);} }while(0)
+
+/* ================== FEATURES ================== */
+#define FEAT_LCD     1
+#define FEAT_WIFI    1
+#define FEAT_SD      1
+#define FEAT_RTC     1
+#define FEAT_CHAIN   1
+#define FEAT_FAN5_6  0
+#define FEAT_VMON    1
+
+/* ============ HARDWARE PINS (T-Relay S3 v1.1 / DevKitC) ============ */
+#define ONE_WIRE_BUS 7
+#define I2C_SDA 15
+#define I2C_SCL 16
+#define PIN_SPI_MOSI 11
+#define PIN_SPI_MISO 13
+#define PIN_SPI_SCK  12
+#define PIN_SD_CS    14
+// LCD (ST7789)
+#define PIN_LCD_CS   10
+#define PIN_LCD_DC    9
+#define PIN_LCD_RST   8
+#define PIN_LCD_BL   17
+// Vstup „Compressor Run“
+#define PIN_COMP_RUN 18
+#define COMP_INVERT  0
+// CHAIN I2C expander
+#define CHAIN_I2C_ADDR 0x30
+// 74HC595 relays
+#define RELAY_SR_DATA  4
+#define RELAY_SR_CLOCK 5
+#define RELAY_SR_LATCH 6
+#define BIT_R1 (1<<0)
+#define BIT_R2 (1<<1)
+#define BIT_R3 (1<<2)
+#define BIT_R4 (1<<3)
+#define BIT_R5 (1<<4) // Spray
+#define BIT_R6 (1<<5) // Reverse
+
+/* ============ Reverse & Logic Params ============ */
+#define REVERSE_DURATION_MS 5000UL
+#define FAN_ROTATION_INTERVAL_MS (1UL * 60UL * 60UL * 1000UL)
+#define COMP_DEBOUNCE_MS 200UL
+
+/* ===== SafetyLock (MANUAL) ===== */
+#define SAFETY_SPINDOWN_MS 30000UL
+enum class SafetyPhase : uint8_t { NONE=0, PREPARE_REVERSE, POST_REVERSE, POST_FANS };
+struct SafetyLock {
+  bool active=false;
+  SafetyPhase phase=SafetyPhase::NONE;
+  uint32_t untilMs=0;
+} g_safe;
+
+/* ================== EEPROM LAYOUT ================== */
+#define EEPROM_SIZE             256
+#define EEPROM_ADDR_CONFVER     1
+#define CONFIG_VERSION          6
+#define EEPROM_ADDR_ROTATE      4
+#define EEPROM_ADDR_SETTINGS    16
+
+/* ===== Uživatelská nastavení ===== */
+struct Settings {
+  float    T_ON;
+  float    T_OFF;
+  float    T_SPRAY;
+  float    HYST;
+  bool     FEAT_PWRMON;
+  uint32_t ServiceMinutes;
+} cfg;
+
+/* ============ Fan rotation (EEPROM) ============ */
+uint8_t  rotateIndex = 0;
+uint32_t lastFanRotate = 0;
+
+/* ================== Globály ================== */
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature ds(&oneWire);
+RTC_DS3231 rtc;
+AsyncWebServer server(80);
+
+struct SensorData {
+  float Tin=0, Tout=0, Tamb=0;
+  float dp=0;
+  float dTdt=0;
+  bool okTin=1, okTout=1, okTamb=1;
+} S;
+
+float Efficiency = 0.0f;
+float Health     = 100.0f;
+
+struct Outputs {
+  bool f1=false,f2=false,f3=false,f4=false,f5=false,f6=false;
+  bool spray=false, reverse=false, unload=false, alarm=false;
+} O;
+
+enum Mode {MODE_AUTO, MODE_SERVICE, MODE_WIZARD, MODE_LOCKOUT, MODE_MANUAL};
+Mode mode = MODE_AUTO;
+
+uint8_t  relayShadow = 0;
+uint8_t  chainShadow = 0;
+uint32_t lastSample=0, lastReverse=0, lastLCD=0, lastLog=0;
+uint32_t lastServiceTick=0;
+
+/* Reverse @ start – stavové proměnné */
+static uint32_t compRiseTime = 0;
+static bool revTestActive = false;
+static uint32_t revTestStart = 0;
+static uint32_t revTestDuration = 0;
+
+/* Debounce vstupu kompresoru */
+static uint32_t compLastDebounce = 0;
+static bool compStableState = false;
+
+/* ================== EEPROM commit ================== */
+static bool eeprom_dirty = false;
+static uint32_t last_commit = 0;
+#define COMMIT_PERIOD_MS 10000UL
+
+/* ================== PM: Power Monitor (ACS712-20A) ================== */
+#define ACS_PIN           1
+#define ACS_MV_PER_A     100.0f
+#define ACS_CAL_SAMPLES  800
+#define ACS_READ_SAMPLES 800
+#define V_FANS            0.0f
+
+static float g_acs_offset_mV = 1650.0f;
+static float g_Irms_A = 0.0f;
+static float g_Pwr_W  = 0.0f;
+
+/* ================== Fan Current Limits ================== */
+#define FAN_I_MIN            0.15f
+#define FAN_I_MAX            3.50f
+#define FAN_FAULT_DELAY_MS   5000UL
+
+struct FanStatus {
+  bool ok       = true;
+  bool faultLow = false;
+  bool faultHigh= false;
+  uint32_t since= 0;
+};
+FanStatus fanAgg;
+
+/* ================== AMP MONITOR 4× ================== */
+#define FAN_ADC_COUNT 4
+const int FAN_ADC_PINS[FAN_ADC_COUNT] = {2, 3, 4, 5};
+static float fanOffset_mV[FAN_ADC_COUNT] = {1650,1650,1650,1650};
+static float fanI[FAN_ADC_COUNT] = {0,0,0,0};
+
+static void fan_calibrate_offsets(){
+  for(int ch=0; ch<FAN_ADC_COUNT; ++ch){
+    uint64_t sum=0;
+    for(int i=0;i<ACS_CAL_SAMPLES;i++){
+      sum += analogReadMilliVolts(FAN_ADC_PINS[ch]);
+      delayMicroseconds(60);
+    }
+    fanOffset_mV[ch] = (float)sum / (float)ACS_CAL_SAMPLES;
+    LOGF(3, "[FANPM] CH%d offset = %.1f mV", ch+1, fanOffset_mV[ch]);
+  }
+}
+static void readFanCurrents(){
+  for(int ch=0; ch<FAN_ADC_COUNT; ++ch){
+    uint64_t acc_sq = 0;
+    for (int i=0;i<ACS_READ_SAMPLES;i++){
+      int mv = analogReadMilliVolts(FAN_ADC_PINS[ch]);
+      int diff = mv - (int)lround(fanOffset_mV[ch]);
+      acc_sq += (int64_t)diff * (int64_t)diff;
+      delayMicroseconds(60);
+    }
+    float mean_sq = (float)acc_sq / (float)ACS_READ_SAMPLES;
+    float rms_mV  = sqrtf(mean_sq);
+    fanI[ch] = rms_mV / ACS_MV_PER_A;
+  }
+}
+
+/* ================== Pomocné ================== */
+void clearOutputs(){ O = Outputs{}; }
+void logError(const char* msg){
+#if FEAT_SD
+  File f = SD.open("/error.log", FILE_APPEND);
+  if (f){ f.println(msg); f.close(); }
+#endif
+  Serial.println(msg);
+}
+static inline bool anyFansOn() {
+  return (O.f1||O.f2||O.f3||O.f4
+#if FEAT_FAN5_6
+    || O.f5 || O.f6
+#endif
+  );
+}
+static void startSafetyLock(SafetyPhase ph, uint32_t durMs){
+  g_safe.active = true;
+  g_safe.phase  = ph;
+  g_safe.untilMs= millis() + durMs;
+  LOGF(3, "[SAFE] Start %s, %lus",
+       (ph==SafetyPhase::PREPARE_REVERSE?"PREPARE_REVERSE":
+        ph==SafetyPhase::POST_REVERSE?"POST_REVERSE":
+        ph==SafetyPhase::POST_FANS?"POST_FANS":"NONE"),
+       (unsigned long)(durMs/1000));
+}
+static void cancelSafetyLock(){
+  if (g_safe.active){
+    LOG(3, "[SAFE] Cancelled");
+    g_safe.active=false;
+    g_safe.phase=SafetyPhase::NONE;
+    g_safe.untilMs=0;
+  }
+}
+
+/* ================== 74HC595 relays ================== */
+void srWrite(uint8_t v){
+  digitalWrite(RELAY_SR_LATCH, LOW);
+  for (uint8_t i=0;i<8;i++){
+    digitalWrite(RELAY_SR_CLOCK, LOW);
+    digitalWrite(RELAY_SR_DATA, (v>>i)&1);
+    digitalWrite(RELAY_SR_CLOCK, HIGH);
+  }
+  digitalWrite(RELAY_SR_LATCH, HIGH);
+}
+void relays_init(){
+  pinMode(RELAY_SR_DATA,  OUTPUT);
+  pinMode(RELAY_SR_CLOCK, OUTPUT);
+  pinMode(RELAY_SR_LATCH, OUTPUT);
+  relayShadow = 0;
+  srWrite(relayShadow);
+}
+void relays_apply(bool f1,bool f2,bool f3,bool f4,bool spray,bool rev){
+  relayShadow = 0;
+  if (f1) relayShadow |= BIT_R1;
+  if (f2) relayShadow |= BIT_R2;
+  if (f3) relayShadow |= BIT_R3;
+  if (f4) relayShadow |= BIT_R4;
+  if (spray) relayShadow |= BIT_R5;
+  if (rev)   relayShadow |= BIT_R6;
+  srWrite(relayShadow);
+}
+
+/* ================== CHAIN (I2C) ================== */
+void chainWrite(uint8_t mask){
+#if FEAT_CHAIN
+  chainShadow = mask;
+  Wire.beginTransmission(CHAIN_I2C_ADDR);
+  Wire.write(chainShadow);
+  Wire.endTransmission();
+#endif
+}
+void chainSet(uint8_t bit, bool on){
+#if FEAT_CHAIN
+  if (on) chainShadow |= (1<<bit);
+  else    chainShadow &= ~(1<<bit);
+  Wire.beginTransmission(CHAIN_I2C_ADDR);
+  Wire.write(chainShadow);
+  Wire.endTransmission();
+#endif
+}
+
+/* ================== LCD (LovyanGFX) ================== */
+class LGFX_Lcd : public lgfx::LGFX_Device {
+  lgfx::Panel_ST7789 _panel;
+  lgfx::Bus_SPI _bus;
+  lgfx::Light_PWM _light;
+public:
+  LGFX_Lcd() {
+    auto b = _bus.config();
+    b.spi_host   = SPI2_HOST;
+    b.spi_mode   = 0;
+    b.freq_write = 40000000;
+    b.freq_read  = 16000000;
+    b.pin_sclk   = PIN_SPI_SCK;
+    b.pin_mosi   = PIN_SPI_MOSI;
+    b.pin_miso   = -1;
+    b.pin_dc     = PIN_LCD_DC;
+    _bus.config(b); _panel.setBus(&_bus);
+
+    auto p = _panel.config();
+    p.pin_cs     = PIN_LCD_CS;
+    p.pin_rst    = PIN_LCD_RST;
+    p.panel_width  = 170;
+    p.panel_height = 320;
+    p.memory_width = 170;
+    p.memory_height= 320;
+    p.offset_x   = 0; p.offset_y = 0;
+    p.invert     = true;
+    p.bus_shared = true;
+    _panel.config(p);
+
+    auto l = _light.config();
+    l.pin_bl = PIN_LCD_BL; l.freq = 12000; l.pwm_channel = 7;
+    _light.config(l);
+    _panel.setLight(&_light);
+    setPanel(&_panel);
+  }
+} lcd;
+
+static void lcd_banner(){
+#if FEAT_LCD
+  lcd.fillRect(0, 0, 320, 28, lcd.color888(20, 24, 32));
+  lcd.drawFastHLine(0, 28, 320, lcd.color888(70, 120, 200));
+  lcd.setTextSize(1);
+  lcd.setTextColor(lcd.color888(200, 210, 220), lcd.color888(20,24,32));
+  lcd.setCursor(8, 8);
+  lcd.print("BasicLine S3 — Industrial");
+#endif
+}
+
+void lcd_icons_row(int y){
+#if FEAT_LCD
+  auto box = [&](int x, const char* lbl, bool on){
+    lcd.fillRoundRect(x,y,34,22,4, on?TFT_GREEN:TFT_DARKGREY);
+    lcd.setTextColor(TFT_BLACK); lcd.setCursor(x+6,y+6); lcd.print(lbl);
+  };
+  int x=4;
+  box(x,"F1",O.f1); x+=36;
+  box(x,"F2",O.f2); x+=36;
+  box(x,"F3",O.f3); x+=36;
+  box(x,"F4",O.f4); x+=36;
+  box(x,"SP",O.spray); x+=36;
+  box(x,"RV",O.reverse); x+=36;
+  box(x,"UL", (mode==MODE_MANUAL)?false:O.unload); x+=36;
+  box(x,"AL", (mode==MODE_MANUAL)?false:O.alarm);
+#endif
+}
+
+void lcd_main(){
+#if FEAT_LCD
+  lcd.startWrite();
+  lcd.fillScreen(TFT_BLACK);
+
+  lcd_banner();
+
+  lcd.setTextColor(TFT_WHITE,TFT_BLACK);
+  lcd.setTextSize(2);
+  lcd.setCursor(8, 38);
+  lcd.print("Mode: ");
+  switch(mode){
+    case MODE_AUTO:    lcd.print("AUTO"); break;
+    case MODE_SERVICE: lcd.print("SERVICE"); break;
+    case MODE_WIZARD:  lcd.print("WIZARD"); break;
+    case MODE_LOCKOUT: lcd.print("LOCKOUT"); break;
+    case MODE_MANUAL:  lcd.print("MANUAL"); break;
+  }
+
+  lcd.setCursor(8,64);  lcd.printf("Tin  : %5.1f C", S.Tin);
+  lcd.setCursor(8,88);  lcd.printf("Tout : %5.1f C", S.Tout);
+  lcd.setCursor(8,112); lcd.printf("Tamb : %5.1f C", S.Tamb);
+  lcd.setCursor(8,136); lcd.printf("dT/dt: %6.3f C/s", S.dTdt);
+  lcd.setCursor(8,160); lcd.printf("Eff  : %5.1f %%", Efficiency);
+  lcd.setCursor(8,184); lcd.printf("I_RMS: %4.2f A", g_Irms_A);
+  lcd.setCursor(8,208); lcd.printf("PWR  : %6.1f W", g_Pwr_W);
+
+#if FEAT_VMON
+  extern float g_Urms_V[3];
+  lcd.setCursor(8,232); lcd.printf("U: %4.0f %4.0f %4.0f V", g_Urms_V[0], g_Urms_V[1], g_Urms_V[2]);
+#else
+  lcd.setCursor(8,232); lcd.printf("T_ON:%4.1f  T_OFF:%4.1f  H:%3.1f", cfg.T_ON, cfg.T_OFF, cfg.HYST);
+#endif
+
+  if (O.reverse) {
+    lcd.fillRoundRect(8, 270, 200, 30, 6, TFT_YELLOW);
+    lcd.setTextColor(TFT_BLACK);
+    lcd.setCursor(14, 279);
+    lcd.print("REVERSE ACTIVE");
+  }
+
+  lcd_icons_row(244);
+  lcd.endWrite();
+#endif
+}
+
+/* ================== Senzory ================== */
+DeviceAddress a0,a1,a2; bool have0=false, have1=false, have2=false;
+
+static float clamp_temp(float t){
+  if (t < -50 || t > 150) return NAN;
+  return t;
+}
+
+void sensors_init(){
+  ds.begin();
+  ds.getAddress(a0,0); ds.getAddress(a1,1); ds.getAddress(a2,2);
+  have0 = ds.validAddress(a0);
+  have1 = ds.validAddress(a1);
+  have2 = ds.validAddress(a2);
+}
+
+void sensors_read(){
+  ds.requestTemperatures();
+  S.okTin  = have0; S.okTout = have1; S.okTamb = have2;
+  if (have0) S.Tin  = clamp_temp(ds.getTempC(a0));
+  if (have1) S.Tout = clamp_temp(ds.getTempC(a1));
+  if (have2) S.Tamb = clamp_temp(ds.getTempC(a2));
+
+  S.okTin  = S.okTin  && !isnan(S.Tin);
+  S.okTout = S.okTout && !isnan(S.Tout);
+  S.okTamb = S.okTamb && !isnan(S.Tamb);
+
+  static float lastTout = 0;
+  uint32_t now = millis();
+
+  if (!S.okTout) {
+    lastSample = now;
+    lastTout   = S.Tout;
+    S.dTdt     = 0;
+    return;
+  }
+
+  if (lastSample == 0) {
+    lastSample = now;
+    lastTout   = S.Tout;
+    S.dTdt     = 0;
+  } else {
+    float dt = (now - lastSample) / 1000.0f;
+    if (dt > 0.1f) S.dTdt = (S.Tout - lastTout) / dt;
+    lastTout   = S.Tout;
+    lastSample = now;
+  }
+
+  if (S.okTin && S.okTout) {
+    float delta = S.Tout - S.Tin;
+    Efficiency = constrain((delta / 20.0f) * 100.0f, 0.0f, 100.0f);
+  } else {
+    Efficiency = 0.0f;
+  }
+  Health = Efficiency;
+  if (!S.okTin || !S.okTout) Health *= 0.5f;
+  if (!S.okTamb) Health *= 0.9f;
+}
+
+/* ================== SD CSV log ================== */
+void logCSV(){
+#if FEAT_SD
+  File f = SD.open("/bls3_log.csv", FILE_APPEND);
+  if (f){
+    DateTime now(2000,1,1,0,0,0);
+#if FEAT_RTC
+    if (rtc.begin()) now = rtc.now();
+#endif
+    char ts[32];
+    snprintf(ts,sizeof(ts),"%04d-%02d-%02d %02d:%02d:%02d",
+      now.year(),now.month(),now.day(),now.hour(),now.minute(),now.second());
+
+#if FEAT_VMON
+    extern float g_Urms_V[3];
+    float Uavg = (g_Urms_V[0] + g_Urms_V[1] + g_Urms_V[2]) / 3.0f;
+#else
+    float Uavg = 0;
+#endif
+
+    f.printf("%s;%.1f;%.1f;%.1f;%.1f;%.3f;%.1f;%.1f;%.2f;%.1f;%d;%d;%d;%d;%d;%d;%d;%.2f;%.2f;%.2f;%.2f;%.1f;%.1f;%.1f;%.1f\n",
+      ts, S.Tin,S.Tout,S.Tamb,S.dp,S.dTdt, Efficiency, Health,
+      g_Irms_A, g_Pwr_W,
+      O.f1,O.f2,O.f3,O.f4,O.spray,O.reverse,O.unload,
+      fanI[0], fanI[1], fanI[2], fanI[3],
+#if FEAT_VMON
+      g_Urms_V[0], g_Urms_V[1], g_Urms_V[2], Uavg
+#else
+      0.0f, 0.0f, 0.0f, 0.0f
+#endif
+    );
+    f.close();
+  } else {
+    logError("[ERR] SD open /bls3_log.csv failed");
+  }
+#endif
+}
+
+/* ================== LOCKOUT ================== */
+void apply_all(); // fwd
+
+void lockout_trigger(const char* reason){
+  LOGF(2, "[LOCKOUT] Triggered: %s", reason);
+  mode = MODE_LOCKOUT;
+  clearOutputs();
+  O.alarm = true;
+  apply_all();
+}
+bool is_lockout(){ return mode == MODE_LOCKOUT; }
+
+/* ================== Logika ================== */
+void apply_all(){
+  relays_apply(O.f1,O.f2,O.f3,O.f4,O.spray,O.reverse);
+#if FEAT_CHAIN
+  chainSet(0, O.unload); // CR1
+  chainSet(3, O.alarm);  // CR4
+#if FEAT_FAN5_6
+  chainSet(1, O.f5);     // CR2
+  chainSet(2, O.f6);     // CR3
+#endif
+#endif
+}
+
+void logic_AUTO(){
+  if (is_lockout()) { apply_all(); return; }
+
+  bool sensorFail = (!S.okTin || !S.okTout);
+  O.unload = sensorFail;
+  O.alarm  = sensorFail;
+
+  int stages = 0;
+  if (S.okTout && S.Tout >= cfg.T_ON) {
+    float over = S.Tout - cfg.T_ON;
+    if      (over > (3.0f * cfg.HYST)) stages = 4;
+    else if (over > (2.0f * cfg.HYST)) stages = 3;
+    else if (over > (1.0f * cfg.HYST)) stages = 2;
+    else                               stages = 1;
+  } else if (S.okTout && S.Tout <= cfg.T_OFF) {
+    stages = 0;
+  }
+
+  uint32_t now = millis();
+  if (now - lastFanRotate > FAN_ROTATION_INTERVAL_MS && stages > 0 && stages < 4) {
+    rotateIndex = (rotateIndex + 1) % 4;
+    EEPROM.put(EEPROM_ADDR_ROTATE, rotateIndex);
+    eeprom_dirty = true;
+    lastFanRotate = now;
+    LOGF(3, "[ROTATE] index=%u", rotateIndex);
+  }
+
+  bool fans[4] = {false,false,false,false};
+  if (stages > 0) for (int i=0; i<stages; i++) fans[(rotateIndex + i) % 4] = true;
+  O.f1=fans[0]; O.f2=fans[1]; O.f3=fans[2]; O.f4=fans[3];
+#if FEAT_FAN5_6
+  O.f5=0; O.f6=0;
+#endif
+
+  O.spray = (S.okTout && (S.Tout >= cfg.T_SPRAY));
+
+  bool rawComp = digitalRead(PIN_COMP_RUN);
+  if (COMP_INVERT) rawComp = !rawComp;
+
+  if (rawComp != compStableState) compLastDebounce = now;
+  if ((now - compLastDebounce) >= COMP_DEBOUNCE_MS) {
+    if (rawComp != compStableState) {
+      compStableState = rawComp;
+      LOGF(3, "[COMP] stable state -> %d", compStableState);
+      if (compStableState) compRiseTime = now;
+    }
+  }
+
+  bool compState = compStableState;
+
+  bool safetyBlock = O.spray || sensorFail || O.unload;
+  if (compState && !O.reverse && !revTestActive && (now - compRiseTime > 500) && !safetyBlock) {
+    O.reverse = true;
+    lastReverse = now;
+    LOG(3, "[REV] Start pulse after COMP_RUN rise");
+  }
+  if (O.reverse && !revTestActive && (now - lastReverse >= REVERSE_DURATION_MS)) {
+    O.reverse = false;
+    LOG(3, "[REV] End of pulse");
+  }
+
+  if (revTestActive) {
+    if (!O.reverse) { O.reverse = true; lastReverse = now; }
+    if (now - revTestStart >= revTestDuration) {
+      O.reverse = false;
+      revTestActive = false;
+      LOG(3, "[REVTEST] finished");
+    }
+  }
+
+  if (O.spray) { O.reverse = false; revTestActive = false; }
+
+  apply_all();
+}
+
+void logic_SERVICE(){ apply_all(); }
+
+void logic_WIZARD(){
+  static int step=0; static uint32_t t0=0;
+  if (step==0){ clearOutputs(); step=1; t0=millis(); }
+  auto drive = [&](int s, bool on){
+    clearOutputs();
+    switch(s){
+      case 1: O.f1=on; break;
+      case 2: O.f2=on; break;
+      case 3: O.f3=on; break;
+      case 4: O.f4=on; break;
+      case 5: O.spray=on; break;
+      case 6: O.reverse=on; break;
+      case 7: O.unload=on; break;
+      case 8: O.alarm=on;  break;
+    } apply_all();
+  };
+  uint32_t now = millis();
+  if      (now - t0 < 1500) drive(step,true);
+  else if (now - t0 < 2000) drive(step,false);
+  else { step++; t0=now; }
+  if (step>8){ mode=MODE_AUTO; step=0; }
+}
+
+/* ================== Factory Reset ================== */
+void factory_reset(){
+  rotateIndex = 0;
+  EEPROM.put(EEPROM_ADDR_ROTATE, rotateIndex);
+  cfg.T_ON=35.0f; cfg.T_OFF=32.0f; cfg.T_SPRAY=48.0f; cfg.HYST=3.0f;
+  cfg.FEAT_PWRMON=false; cfg.ServiceMinutes=0;
+  EEPROM.put(EEPROM_ADDR_SETTINGS, cfg);
+  EEPROM.write(EEPROM_ADDR_CONFVER, CONFIG_VERSION);
+  eeprom_dirty = true;
+  LOG(2, "[FACTORY] defaults prepared");
+}
+
+/* ================== Watchdog ================== */
+#define WDT_TIMEOUT_SEC 10
+
+/* ================== Power Monitor ================== */
+void pm_calibrate_offset(){
+  uint64_t sum = 0;
+  for (int i=0;i<ACS_CAL_SAMPLES;i++){
+    sum += analogReadMilliVolts(ACS_PIN);
+    delayMicroseconds(60);
+  }
+  g_acs_offset_mV = (float)sum / (float)ACS_CAL_SAMPLES;
+  LOGF(3, "[PM] Cal offset = %.1f mV", g_acs_offset_mV);
+}
+void pm_read_rms(){
+  if (!cfg.FEAT_PWRMON){ g_Irms_A = 0.0f; g_Pwr_W = 0.0f; return; }
+  uint64_t acc_sq = 0;
+  for (int i=0;i<ACS_READ_SAMPLES;i++){
+    int mv = analogReadMilliVolts(ACS_PIN);
+    int diff = mv - (int)lround(g_acs_offset_mV);
+    acc_sq += (int64_t)diff * (int64_t)diff;
+    delayMicroseconds(60);
+  }
+  float mean_sq = (float)acc_sq / (float)ACS_READ_SAMPLES;
+  float rms_mV  = sqrtf(mean_sq);
+  g_Irms_A = rms_mV / ACS_MV_PER_A;
+  if (V_FANS > 0.0f) g_Pwr_W = V_FANS * g_Irms_A;
+  else               g_Pwr_W = 0.0f;
+}
+
+/* ================== Proudová diagnostika ================== */
+void checkFanCurrent(){
+  if (!cfg.FEAT_PWRMON){ fanAgg = FanStatus{}; return; }
+
+  const bool anyFanOn_now = (O.f1||O.f2||O.f3||O.f4
+#if FEAT_FAN5_6
+    ||O.f5||O.f6
+#endif
+  ) || O.spray;
+
+  if (!anyFanOn_now) { fanAgg = FanStatus{}; return; }
+
+  float I = g_Irms_A;
+  bool over  = (I > FAN_I_MAX);
+  bool under = (I < FAN_I_MIN && I > 0.05f);
+
+  if (over || under) {
+    if (fanAgg.since == 0) fanAgg.since = millis();
+    if (millis() - fanAgg.since >= FAN_FAULT_DELAY_MS) {
+      fanAgg.ok        = false;
+      fanAgg.faultHigh = over;
+      fanAgg.faultLow  = under;
+      lockout_trigger(over ? "Fan current OVERLOAD" : "Fan NO CURRENT");
+      LOGF(2, "[FAULT] Fan aggregate current out of range: %.2f A (min=%.2f, max=%.2f)", I, FAN_I_MIN, FAN_I_MAX);
+    }
+  } else {
+    fanAgg.ok = true;
+    fanAgg.faultHigh = fanAgg.faultLow = false;
+    fanAgg.since = 0;
+  }
+}
+
+/* ================== === VMON (ZMPT110B) – 3× RMS === ================== */
+#if FEAT_VMON
+#define ZMPT_PIN_L1 19
+#define ZMPT_PIN_L2 20
+#define ZMPT_PIN_L3 21
+#define ZMPT_MV_PER_V   2.0f
+#define ZMPT_CAL_SAMPLES 800
+#define ZMPT_READ_SAMPLES 800
+static float g_Uoffset_mV[3] = {1650,1650,1650};
+float g_Urms_V[3] = {0,0,0};
+
+static void vmon_pin_init(){
+  pinMode(ZMPT_PIN_L1, INPUT);
+  pinMode(ZMPT_PIN_L2, INPUT);
+  pinMode(ZMPT_PIN_L3, INPUT);
+}
+static void vmon_calibrate_offsets(){
+  const int pins[3] = {ZMPT_PIN_L1, ZMPT_PIN_L2, ZMPT_PIN_L3};
+  for(int i=0;i<3;i++){
+    uint64_t sum=0;
+    for(int k=0;k<ZMPT_CAL_SAMPLES;k++){
+      sum += analogReadMilliVolts(pins[i]);
+      delayMicroseconds(60);
+    }
+    g_Uoffset_mV[i] = (float)sum / (float)ZMPT_CAL_SAMPLES;
+    LOGF(3,"[VMON] CH%d offset = %.1f mV", i+1, g_Uoffset_mV[i]);
+  }
+}
+static void vmon_read_rms(){
+  const int pins[3] = {ZMPT_PIN_L1, ZMPT_PIN_L2, ZMPT_PIN_L3};
+  for(int i=0;i<3;i++){
+    uint64_t acc_sq=0;
+    for(int k=0;k<ZMPT_READ_SAMPLES;k++){
+      int mv = analogReadMilliVolts(pins[i]);
+      int diff = mv - (int)lround(g_Uoffset_mV[i]);
+      acc_sq += (int64_t)diff * (int64_t)diff;
+      delayMicroseconds(60);
+    }
+    float mean_sq = (float)acc_sq / (float)ZMPT_READ_SAMPLES;
+    float rms_mV  = sqrtf(mean_sq);
+    g_Urms_V[i] = rms_mV / ZMPT_MV_PER_V;
+  }
+}
+#endif /* FEAT_VMON */
+
+/* ================== Wi-Fi / Web ================== */
+#if FEAT_WIFI
+const char* AP_SSID="BasicLine_S3";
+const char* AP_PASS="12345678";
+#endif
+
+String jsonStatus(){
+  StaticJsonDocument<2300> doc;
+  doc["Tin"]=S.Tin; doc["Tout"]=S.Tout; doc["Tamb"]=S.Tamb;
+  doc["dp"]=S.dp; doc["dTdt"]=S.dTdt;
+  doc["Eff"]=Efficiency; doc["Health"]=Health;
+
+  doc["I_RMS"]=g_Irms_A;
+  doc["PWR"]=g_Pwr_W;
+
+#if FEAT_VMON
+  float Uavg = (g_Urms_V[0] + g_Urms_V[1] + g_Urms_V[2]) / 3.0f;
+  doc["U_L1"]=g_Urms_V[0];
+  doc["U_L2"]=g_Urms_V[1];
+  doc["U_L3"]=g_Urms_V[2];
+  doc["U_AVG"]=Uavg;
+#else
+  doc["U_L1"]=0.0; doc["U_L2"]=0.0; doc["U_L3"]=0.0; doc["U_AVG"]=0.0;
+#endif
+
+  bool jsonUnload = (mode==MODE_MANUAL)?false:O.unload;
+  bool jsonAlarm  = (mode==MODE_MANUAL)?false:O.alarm;
+
+  JsonArray fanIarr = doc.createNestedArray("FanI");
+  for(int i=0;i<FAN_ADC_COUNT;i++) fanIarr.add(fanI[i]);
+
+  JsonArray fans = doc.createNestedArray("Fan");
+  fans.add(O.f1); fans.add(O.f2); fans.add(O.f3); fans.add(O.f4);
+#if FEAT_FAN5_6
+  fans.add(O.f5); fans.add(O.f6);
+#endif
+
+  const char* faultStr = fanAgg.ok ? "" : (fanAgg.faultHigh ? "Overload" : "No current");
+  doc["FanFault"] = faultStr;
+  doc["Lockout"]  = (mode==MODE_LOCKOUT);
+
+  doc["Spray"]   = O.spray;
+  doc["Reverse"] = O.reverse ? "START" : "";
+  doc["Unload"]  = jsonUnload;
+  doc["Alarm"]   = jsonAlarm;
+
+  const char* m = "AUTO";
+  if (mode==MODE_SERVICE) m="SERVICE";
+  else if (mode==MODE_WIZARD) m="WIZARD";
+  else if (mode==MODE_LOCKOUT) m="LOCKOUT";
+  else if (mode==MODE_MANUAL) m="MANUAL";
+  doc["Mode"]=m;
+
+  doc["SafetyLockActive"] = g_safe.active;
+  uint32_t msLeft = 0;
+  if (g_safe.active){
+    int32_t diff = (int32_t)(g_safe.untilMs - millis());
+    if (diff > 0) msLeft = (uint32_t)diff; else msLeft = 0;
+  }
+  doc["SafetyLockMS"] = msLeft;
+  const char* phase = "NONE";
+  if (g_safe.phase==SafetyPhase::PREPARE_REVERSE) phase="PREPARE_REVERSE";
+  else if (g_safe.phase==SafetyPhase::POST_REVERSE) phase="POST_REVERSE";
+  else if (g_safe.phase==SafetyPhase::POST_FANS)    phase="POST_FANS";
+  doc["SafetyPhase"]=phase;
+
+  JsonObject c = doc.createNestedObject("Cfg");
+  c["T_ON"]=cfg.T_ON; c["T_OFF"]=cfg.T_OFF; c["T_SPRAY"]=cfg.T_SPRAY; c["HYST"]=cfg.HYST;
+  c["FEAT_PWRMON"]=cfg.FEAT_PWRMON;
+  c["SrvMin"]=cfg.ServiceMinutes;
+
+  String out; serializeJson(doc,out); return out;
+}
+
+/* ================== HTML (Elegant UI) ================== */
+#if FEAT_WIFI
+const char* HTML = R"HTML(<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BasicLine S3 v1.3.9</title>
+<style>
+:root{--card:#1e1f24;--ink:#eaeaea;--muted:#9aa3ad;--ok:#5cc06a;--off:#444;--pri:#5aa2ff;--btn:#222}
+*{box-sizing:border-box}body{font-family:system-ui,Segoe UI,Roboto,sans-serif;margin:14px;background:#111;color:var(--ink)}
+.grid{display:grid;gap:12px}@media(min-width:900px){.grid{grid-template-columns:1fr 1fr}}
+.card{border:1px solid #333;background:var(--card);border-radius:12px;padding:12px}
+.badge{display:inline-block;padding:6px 10px;border-radius:8px;background:#222;margin-right:6px}
+.on{background:#1f3}.off{background:#444}
+button{padding:10px 14px;border-radius:12px;background:var(--btn);color:#fff;border:1px solid #333;cursor:pointer}
+button:hover{filter:brightness(1.1)}
+.row{display:flex;gap:12px;flex-wrap:wrap}
+.kpi{min-width:150px;padding:8px 10px;border:1px solid #333;border-radius:10px;background:#17181d}
+.kpi b{display:block;font-size:20px;margin-top:4px}
+canvas{width:100%;height:160px;display:block;background:#0b0c10;border-radius:8px;border:1px solid #222}
+small{color:var(--muted)}
+.fangrid{display:flex;flex-wrap:wrap;gap:10px}
+.fanbox{position:relative;width:140px;height:110px;border-radius:12px;border:1px solid #333;background:#17181d;color:#eee;display:flex;flex-direction:column;justify-content:center;align-items:center;transition:.2s}
+.fanbox b{font-size:20px;line-height:1}
+.fanbox span{font-size:12px;opacity:.85;margin-top:4px}
+.fanbox.on{background:#1b3;color:#000;border-color:#194}
+.fanbox.on::before{content:"";position:absolute;top:10px;left:10px;width:20px;height:20px;border:3px solid rgba(0,0,0,.25);border-top-color:rgba(0,0,0,.65);border-bottom-color:rgba(0,0,0,.65);border-radius:50%;animation:spinFan .8s linear infinite}
+@keyframes spinFan{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+#lockbanner{display:none;margin:8px 0;padding:10px;border-radius:8px;background:#3b1111;border:1px solid #a33;color:#fff}
+#safelock{display:none;margin:8px 0;padding:10px;border-radius:8px;background:#113b3b;border:1px solid #3aa;color:#fff}
+.switch{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid #333;border-radius:999px;background:#15161a}
+.switch b{font-size:14px}
+
+/* Header logo */
+.logohead{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 10px 0}
+.logo{display:flex;align-items:center;gap:10px}
+.logomain{font-size:20px;font-weight:700;letter-spacing:.4px}
+.logomain .bl{color:#eaeaea}
+.logomain .s3{
+  background:linear-gradient(180deg,#4ea3ff,#2a7de6);
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  margin-left:3px;
+}
+.logosub{font-size:11px;color:#9aa3ad;letter-spacing:.6px;margin-top:-2px}
+.logo svg{animation:spinLogo 6s linear infinite;transform-origin: 16px 16px;opacity:.92}
+@keyframes spinLogo{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+
+/* Elegant Settings */
+.form{display:grid;gap:10px}
+.row2{display:grid;gap:10px;grid-template-columns:1fr 1fr}
+label{font-size:13px;color:#cfd5db}
+.input{
+  display:flex;align-items:center;gap:8px;
+  background:#15171d;border:1px solid #2a2f36;border-radius:10px;padding:10px 12px
+}
+.input input{
+  width:100%;font-size:16px;color:#eaf2ff;background:transparent;border:none;outline:none
+}
+.btnbar{display:flex;gap:10px;align-items:center;margin-top:4px}
+.btn-primary{background:linear-gradient(180deg,#4ea3ff,#2a7de6);border:1px solid #2a7de6}
+.btn-warn{background:#a55;border:1px solid #884}
+#msg{min-height:20px;color:#a0e6ff}
+.footer{display:flex;justify-content:center;opacity:.7;margin-top:12px}
+
+/* Voltage grid */
+.u4{display:grid;gap:12px}
+@media(min-width:1100px){.u4{grid-template-columns:1fr 1fr 1fr 1fr}}
+</style></head><body>
+
+<h2 class="logohead">
+  <div class="logo">
+    <!-- Jemný „štětcom“ kreslený větrák – jen obrys, rotace kolem středu -->
+    <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true">
+      <circle cx="16" cy="16" r="12" fill="none" stroke="#2a7de6" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="6 6"/>
+      <path d="M16 5 C17 9, 22 10, 23 8 C20 6,18 5,16 5 Z" fill="none" stroke="#4ea3ff" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M27 16 C23 17, 22 22, 24 23 C26 20,27 18,27 16 Z" fill="none" stroke="#4ea3ff" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M16 27 C15 23, 10 22, 9 24 C12 26,14 27,16 27 Z" fill="none" stroke="#4ea3ff" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M5 16 C9 15, 10 10, 8 9 C6 12,5 14,5 16 Z" fill="none" stroke="#4ea3ff" stroke-width="2" stroke-linejoin="round"/>
+    </svg>
+    <div>
+      <div class="logomain"><span class="bl">BasicLine</span><span class="s3">S3</span></div>
+      <div class="logosub">Industrial</div>
+    </div>
+  </div>
+  <div class="switch">
+    <b>Mode:</b>
+    <button id="modeBtn" onclick="toggleMode()">AUTO</button>
+  </div>
+</h2>
+
+<div id="lockbanner">LOCKOUT – zařízení je v bezpečném zámku. Oprav chybu a klikni na <b>Unlock</b>.</div>
+<div id="safelock">SafetyLock – prosím vyčkej <b id="slcount">30</b> s.</div>
+
+<div class="grid">
+  <div class="card">
+    <div id="vals" class="row"></div>
+    <div id="icons" style="margin-top:8px;"></div>
+  </div>
+
+  <div class="card">
+    <h3>Settings</h3>
+    <form class="form" onsubmit="saveCfg();return false;">
+      <div class="row2">
+        <div>
+          <label>T_ON (°C)</label>
+          <div class="input"><input id="T_ON" type="number" step="0.1"></div>
+        </div>
+        <div>
+          <label>T_OFF (°C)</label>
+          <div class="input"><input id="T_OFF" type="number" step="0.1"></div>
+        </div>
+      </div>
+      <div class="row2">
+        <div>
+          <label>T_SPRAY (°C)</label>
+          <div class="input"><input id="T_SPRAY" type="number" step="0.1"></div>
+        </div>
+        <div>
+          <label>Hysteresis (°C)</label>
+          <div class="input"><input id="HYST" type="number" step="0.1"></div>
+        </div>
+      </div>
+      <div>
+        <label>Power Monitor (0/1)</label>
+        <div class="input"><input id="FEAT_PWRMON" type="number" min="0" max="1" step="1"></div>
+      </div>
+      <div class="btnbar">
+        <button class="btn-primary" type="submit">Save</button>
+        <button class="btn-warn" id="unlockbtn" type="button" onclick="unlock()">UNLOCK</button>
+        <span id="msg"></span>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Fan Monitor</h3>
+  <div id="fanGrid" class="fangrid"></div>
+  <div id="faultmsg" style="margin-top:8px;color:#f77;"></div>
+</div>
+
+<div class="grid">
+  <div class="card"><h3>Efficiency (%)</h3><canvas id="c_eff"></canvas></div>
+  <div class="card"><h3>Tin (°C)</h3><canvas id="c_tin"></canvas></div>
+  <div class="card"><h3>Tout (°C)</h3><canvas id="c_tout"></canvas></div>
+  <div class="card"><h3>Tamb (°C)</h3><canvas id="c_tamb"></canvas></div>
+  <div class="card"><h3>I<sub>RMS</sub> (A)</h3><canvas id="c_i"></canvas></div>
+  <div class="card"><h3>PWR (W)</h3><canvas id="c_pwr"></canvas></div>
+</div>
+
+<!-- Napěťové grafy U_L1/2/3/AVG -->
+<div class="u4">
+  <div class="card"><h3>U_L1 (V)</h3><canvas id="c_u1"></canvas></div>
+  <div class="card"><h3>U_L2 (V)</h3><canvas id="c_u2"></canvas></div>
+  <div class="card"><h3>U_L3 (V)</h3><canvas id="c_u3"></canvas></div>
+  <div class="card"><h3>U_AVG (V)</h3><canvas id="c_uavg"></canvas></div>
+</div>
+
+<div class="footer">© Martin Kuna</div>
+
+<script>
+const MAXPTS=240;
+const series={ eff:[], tin:[], tout:[], tamb:[], i:[], pwr:[], u1:[], u2:[], u3:[], uavg:[] };
+function push(a,v){a.push(v); if(a.length>MAXPTS) a.shift();}
+function drawLine(ctx, data, min, max){
+  const w=ctx.canvas.width, h=ctx.canvas.height;
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle="#2b2f3a"; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(32,8); ctx.lineTo(32,h-20); ctx.lineTo(w-8,h-20); ctx.stroke();
+  ctx.fillStyle="#9aa3ad"; ctx.font="12px system-ui";
+  ctx.fillText(max.toFixed(1),4,12);
+  ctx.fillText(min.toFixed(1),4,h-22);
+  if(data.length<2) return;
+  const sx=(w-40)/(MAXPTS-1);
+  ctx.strokeStyle="#9fd"; ctx.lineWidth=2; ctx.beginPath();
+  for(let i=0;i<data.length;i++){
+    const v=data[i]; const y=h-20 - ((v-min)/(max-min))*(h-28);
+    const x=32 + i*sx;
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+}
+function autolim(a, pad=0.1){
+  if(a.length===0) return [0,1];
+  let mn=+Infinity, mx=-Infinity;
+  for(const v of a){ if(isFinite(v)){ if(v<mn) mn=v; if(v>mx) mx=v; } }
+  if(mn===+Infinity) return [0,1];
+  if(mx===mn){ mx+=1; mn-=1; }
+  const span=mx-mn; return [mn-pad*span, mx+pad*span];
+}
+const ctxs={
+  eff: c_eff.getContext("2d"), tin: c_tin.getContext("2d"),
+  tout: c_tout.getContext("2d"), tamb: c_tamb.getContext("2d"),
+  i: c_i.getContext("2d"), pwr: c_pwr.getContext("2d"),
+  u1: c_u1.getContext("2d"), u2: c_u2.getContext("2d"),
+  u3: c_u3.getContext("2d"), uavg: c_uavg.getContext("2d")
+};
+
+let mode="AUTO";
+
+function renderFans(fans, currents, reverseActive){
+  const names=["F1","F2","F3","F4","SPR","REV"];
+  const states=[...fans, null, null];
+  let html="";
+  for(let i=0;i<4;i++){
+    const on = reverseActive ? true : !!states[i];
+    const cur = (currents && typeof currents[i]==="number") ? currents[i] : 0;
+    html += `<div class="fanbox ${on?'on':'off'}" onclick="toggleFan(${i+1})">
+      <b>${names[i]}</b>
+      <span>${on?'Running':'Off'}</span>
+      <span>I = ${cur.toFixed(2)} A</span>
+    </div>`;
+  }
+  const sprOn = !!(window._lastJSON?.Spray);
+  html += `<div class="fanbox ${sprOn?'on':'off'}" onclick="toggleSpray()">
+      <b>${names[4]}</b><span>${sprOn?'Running':'Off'}</span><span>&nbsp;</span></div>`;
+  const revOn = reverseActive;
+  html += `<div class="fanbox ${revOn?'on':'off'}" onclick="toggleReverse()">
+      <b>${names[5]}</b><span>${revOn?'Running':'Off'}</span><span>&nbsp;</span></div>`;
+  fanGrid.innerHTML = html;
+}
+
+async function api(path){ try{ const r=await fetch(path); return await r.text(); }catch(e){ return "ERR"; } }
+
+async function toggleFan(idx){
+  if(mode!=="MANUAL") return;
+  const j = window._lastJSON;
+  if(!j) return;
+  const current = !!j.Fan[idx-1];
+  await api(`/fan?ch=${idx}&on=${current?0:1}`);
+}
+async function toggleSpray(){
+  if(mode!=="MANUAL") return;
+  const on = !!(window._lastJSON?.Spray);
+  await api(`/spray?on=${on?0:1}`);
+}
+async function toggleReverse(){
+  if(mode!=="MANUAL") return;
+  const on = (window._lastJSON?.Reverse==="START");
+  await api(`/reverse?on=${on?0:1}`);
+}
+async function toggleMode(){
+  const to = (mode==="AUTO") ? "manual" : "auto";
+  await api(`/mode?m=${to}`);
+}
+
+function redraw(){
+  let lim;
+  lim=autolim(series.eff);  drawLine(ctxs.eff,  series.eff,  Math.max(0,lim[0]), Math.min(100,lim[1]));
+  lim=autolim(series.tin);  drawLine(ctxs.tin,  series.tin,  lim[0], lim[1]);
+  lim=autolim(series.tout); drawLine(ctxs.tout, series.tout, lim[0], lim[1]);
+  lim=autolim(series.tamb); drawLine(ctxs.tamb, series.tamb, lim[0], lim[1]);
+  lim=autolim(series.i);    drawLine(ctxs.i,    series.i,    Math.max(0,lim[0]), Math.max(1,lim[1]));
+  lim=autolim(series.pwr);  drawLine(ctxs.pwr,  series.pwr,  Math.max(0,lim[0]), Math.max(10,lim[1]));
+  drawLine(ctxs.u1, series.u1, 180, 260);
+  drawLine(ctxs.u2, series.u2, 180, 260);
+  drawLine(ctxs.u3, series.u3, 180, 260);
+  drawLine(ctxs.uavg, series.uavg, 180, 260);
+}
+
+async function tick(){
+  const r=await fetch('/json'); const j=await r.json(); window._lastJSON=j;
+  mode = j.Mode||"AUTO";
+  modeBtn.textContent = mode;
+
+  const Uavg = (j.U_AVG??0);
+  vals.innerHTML = `
+    <div class="kpi"><small>Tin</small><b>${(j.Tin??0).toFixed(1)} °C</b></div>
+    <div class="kpi"><small>Tout</small><b>${(j.Tout??0).toFixed(1)} °C</b></div>
+    <div class="kpi"><small>Tamb</small><b>${(j.Tamb??0).toFixed(1)} °C</b></div>
+    <div class="kpi"><small>Eff</small><b>${(j.Eff??0).toFixed(1)} %</b></div>
+    <div class="kpi"><small>I<sub>RMS</sub></small><b>${(j.I_RMS??0).toFixed(2)} A</b></div>
+    <div class="kpi"><small>PWR</small><b>${(j.PWR??0).toFixed(1)} W</b></div>
+    <div class="kpi"><small>U<sub>AVG</sub></small><b>${Uavg.toFixed(1)} V</b></div>
+  `;
+
+  const names=["F1","F2","F3","F4","SPR","REV","UNL","AL"];
+  let html="";
+  for(let i=0;i<j.Fan.length;i++){ html+=`<span class="badge ${j.Fan[i]?"on":"off"}">${names[i]}</span>`; }
+  html+=`<span class="badge ${j.Spray?"on":"off"}">${names[4]}</span>`;
+  html+=`<span class="badge ${(j.Reverse==="START")?"on":"off"}">${names[5]}</span>`;
+  html+=`<span class="badge ${(mode==="MANUAL")?"off":(j.Unload?"on":"off")}">${names[6]}</span>`;
+  html+=`<span class="badge ${(mode==="MANUAL")?"off":(j.Alarm?"on":"off")}">${names[7]}</span>`;
+  icons.innerHTML = html;
+
+  lockbanner.style.display = j.Lockout ? 'block' : 'none';
+
+  if (j.SafetyLockActive){
+    const s = Math.ceil((j.SafetyLockMS||0)/1000);
+    slcount.textContent = s;
+    safelock.style.display = 'block';
+  } else {
+    safelock.style.display = 'none';
+  }
+
+  const revActive = (j.Reverse==="START");
+  renderFans(j.Fan || [], j.FanI || [], revActive);
+  faultmsg.innerHTML = (j.FanFault && j.FanFault.length) ? ("Fan fault: " + j.FanFault) : "";
+
+  if (!document.activeElement || document.activeElement.tagName !== "INPUT") {
+    T_ON.value = j.Cfg.T_ON; T_OFF.value = j.Cfg.T_OFF; T_SPRAY.value = j.Cfg.T_SPRAY;
+    HYST.value = j.Cfg.HYST; FEAT_PWRMON.value = j.Cfg.FEAT_PWRMON ? 1 : 0;
+  }
+
+  const n=(x)=>+((x??0));
+  push(series.eff, n(j.Eff));
+  push(series.tin, n(j.Tin));
+  push(series.tout, n(j.Tout));
+  push(series.tamb, n(j.Tamb));
+  push(series.i, n(j.I_RMS));
+  push(series.pwr, n(j.PWR));
+  push(series.u1, n(j.U_L1));
+  push(series.u2, n(j.U_L2));
+  push(series.u3, n(j.U_L3));
+  push(series.uavg, n(j.U_AVG));
+  redraw();
+}
+
+async function saveCfg(){
+  const data={
+    T_ON:parseFloat(T_ON.value),
+    T_OFF:parseFloat(T_OFF.value),
+    T_SPRAY:parseFloat(T_SPRAY.value),
+    HYST:parseFloat(HYST.value),
+    FEAT_PWRMON: parseInt(FEAT_PWRMON.value,10)===1
+  };
+  const r=await fetch('/setcfg',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  const t=await r.text(); msg.innerHTML=t; setTimeout(()=>msg.innerHTML="",2000);
+}
+async function unlock(){
+  const r=await fetch('/unlock'); const t=await r.text(); msg.innerHTML=t; setTimeout(()=>msg.innerHTML="",2500);
+}
+
+setInterval(tick,1000); tick();
+</script>
+</body></html>)HTML";
+#endif /* FEAT_WIFI */
+
+/* ================== Setup / Loop ================== */
+void setup(){
+  Serial.begin(115200);
+  delay(50);
+
+#if FEAT_WIFI
+  WiFi.disconnect(true, true);
+  delay(200);
+  WiFi.persistent(false);
+  WiFi.setSleep(false);
+  WiFi.mode(WIFI_AP);
+
+  wifi_country_t country = { "CZ", 1, 13, WIFI_COUNTRY_POLICY_MANUAL };
+  esp_wifi_set_country(&country);
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+
+  IPAddress apIP(192,168,4,1);
+  IPAddress gw(192,168,4,1);
+  IPAddress mask(255,255,255,0);
+  WiFi.softAPConfig(apIP, gw, mask);
+
+  const char* AP_SSID  = "BasicLine_S3";
+  const char* AP_PASS  = "87654321";
+  const int   AP_CH    = 6;
+  const bool  AP_HIDDEN = false;
+
+  bool ok = WiFi.softAP(AP_SSID, AP_PASS, AP_CH, AP_HIDDEN, 4);
+  if (!ok) { logError("[ERR] AP start failed"); }
+  else { LOGF(3, "[WiFi] AP: %s  IP: %s", AP_SSID, WiFi.softAPIP().toString().c_str()); }
+  delay(300);
+#endif
+
+  // WDT
+  esp_task_wdt_deinit();
+  esp_task_wdt_init(WDT_TIMEOUT_SEC, true);
+  esp_task_wdt_add(NULL);
+  LOG(3, "[WDT] Initialized (10s)");
+  LOG(3, "=== BasicLine S3 – Industrial v1.3.9 ===");
+
+  // EEPROM
+  EEPROM.begin(EEPROM_SIZE);
+
+  uint8_t ver = EEPROM.read(EEPROM_ADDR_CONFVER);
+  if (ver != CONFIG_VERSION) {
+    LOG(2, "[EEPROM] Init new config");
+    rotateIndex = 0;
+    EEPROM.put(EEPROM_ADDR_ROTATE, rotateIndex);
+    cfg.T_ON=35.0f; cfg.T_OFF=32.0f; cfg.T_SPRAY=48.0f; cfg.HYST=3.0f;
+    cfg.FEAT_PWRMON=false; cfg.ServiceMinutes=0;
+    EEPROM.put(EEPROM_ADDR_SETTINGS, cfg);
+    EEPROM.write(EEPROM_ADDR_CONFVER, CONFIG_VERSION);
+    EEPROM.commit();
+    last_commit = millis();
+  } else {
+    EEPROM.get(EEPROM_ADDR_ROTATE, rotateIndex);
+    if (rotateIndex>3) rotateIndex=0;
+    EEPROM.get(EEPROM_ADDR_SETTINGS, cfg);
+    if (isnan(cfg.T_ON) || cfg.T_ON<10 || cfg.T_ON>90) {
+      cfg.T_ON=35.0f; cfg.T_OFF=32.0f; cfg.T_SPRAY=48.0f; cfg.HYST=3.0f;
+      cfg.FEAT_PWRMON=false; cfg.ServiceMinutes=0;
+      EEPROM.put(EEPROM_ADDR_SETTINGS, cfg);
+      eeprom_dirty = true;
+    }
+  }
+  LOGF(3, "Rotate=%u  T_ON=%.1f T_OFF=%.1f T_SPRAY=%.1f H=%.1f  PWRMON=%d  SrvMin=%lu",
+      rotateIndex, cfg.T_ON, cfg.T_OFF, cfg.T_SPRAY, cfg.HYST, (int)cfg.FEAT_PWRMON, (unsigned long)cfg.ServiceMinutes);
+
+  lastFanRotate = millis();
+  lastReverse   = millis();
+  lastServiceTick = millis();
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+#if FEAT_CHAIN
+  chainWrite(0x00);
+#endif
+
+  relays_init();
+
+#if COMP_INVERT
+  pinMode(PIN_COMP_RUN, INPUT_PULLUP);
+#else
+  pinMode(PIN_COMP_RUN, INPUT_PULLDOWN);
+#endif
+
+#if FEAT_LCD
+  lcd.init(); lcd.setRotation(1); lcd.setBrightness(180);
+  lcd.fillScreen(TFT_BLACK); lcd.setTextColor(TFT_WHITE);
+  lcd.setCursor(8,8); lcd.print("BasicLine S3 – Boot");
+#endif
+
+#if FEAT_SD
+  SPI.begin(PIN_SPI_SCK, PIN_SPI_MISO, PIN_SPI_MOSI, PIN_SD_CS);
+  if (!SD.begin(PIN_SD_CS)) logError("[ERR] SD init failed");
+  else LOG(3, "[SD] OK");
+#endif
+
+#if FEAT_RTC
+  if (!rtc.begin()) logError("[WARN] RTC not detected");
+#endif
+
+  sensors_init();
+
+  // PM
+  pinMode(ACS_PIN, INPUT);
+  pm_calibrate_offset();
+
+  // Per-fan ADC
+  for(int ch=0; ch<FAN_ADC_COUNT; ++ch) pinMode(FAN_ADC_PINS[ch], INPUT);
+  fan_calibrate_offsets();
+
+#if FEAT_VMON
+  vmon_pin_init();
+  vmon_calibrate_offsets();
+#endif
+
+  // CORS / no-cache
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type");
+  DefaultHeaders::Instance().addHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+
+  server.onNotFound([](AsyncWebServerRequest* r){
+    if (r->method() == HTTP_OPTIONS) { r->send(200); return; }
+    r->send(404, "text/plain", "Not found");
+  });
+
+  // UI & JSON
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* r){ r->send(200,"text/html",HTML);});
+  server.on("/json", HTTP_GET, [](AsyncWebServerRequest* r){ r->send(200,"application/json",jsonStatus());});
+
+  // Nastavení (EEPROM) – POST JSON
+  server.on("/setcfg", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      static String body;
+      if (index == 0) body = "";
+      body += String((char*)data).substring(0, len);
+
+      if (index + len == total) {
+        StaticJsonDocument<256> doc;
+        DeserializationError err = deserializeJson(doc, body);
+        if (err) { request->send(400, "text/plain", "JSON parse error"); return; }
+
+        Settings old = cfg;
+
+        float t_on    = constrain(doc["T_ON"]   | cfg.T_ON,    10.0f, 90.0f);
+        float t_off   = constrain(doc["T_OFF"]  | cfg.T_OFF,    5.0f, 85.0f);
+        float t_spray = constrain(doc["T_SPRAY"]| cfg.T_SPRAY, 20.0f, 90.0f);
+        float hyst    = constrain(doc["HYST"]   | cfg.HYST,     0.5f, 15.0f);
+        bool  pwrmon  = (bool)(doc["FEAT_PWRMON"] | cfg.FEAT_PWRMON);
+
+        if (t_off >= t_on) t_off = max(t_on - hyst, 5.0f);
+
+        cfg.T_ON = t_on;
+        cfg.T_OFF = t_off;
+        cfg.T_SPRAY = t_spray;
+        cfg.HYST = hyst;
+        cfg.FEAT_PWRMON = pwrmon;
+
+        if (memcmp(&cfg, &old, sizeof(Settings)) != 0) {
+          EEPROM.put(EEPROM_ADDR_SETTINGS, cfg);
+          eeprom_dirty = true;
+          LOGF(3, "[CFG] Saved T_ON=%.1f T_OFF=%.1f T_SPRAY=%.1f H=%.1f PWR=%d",
+               cfg.T_ON, cfg.T_OFF, cfg.T_SPRAY, cfg.HYST, (int)cfg.FEAT_PWRMON);
+        }
+
+        request->send(200, "text/plain", "Saved");
+      }
+  });
+
+  // MODE switch: /mode?m=auto|manual
+  server.on("/mode", HTTP_GET, [](AsyncWebServerRequest* r){
+    if (!r->hasParam("m")) { r->send(400,"text/plain","Use /mode?m=auto|manual"); return; }
+    String m = r->getParam("m")->value();
+    m.toLowerCase();
+    cancelSafetyLock();
+    if (m=="manual") {
+      mode = MODE_MANUAL;
+      clearOutputs();
+      apply_all();
+      r->send(200,"text/plain","MODE=MANUAL");
+      LOG(3,"[MODE] MANUAL");
+    } else {
+      mode = MODE_AUTO;
+      r->send(200,"text/plain","MODE=AUTO");
+      LOG(3,"[MODE] AUTO");
+    }
+  });
+
+  // /fan?ch=X&on=0|1  (SafetyLock – POST_FANS při přechodu ALL OFF)
+  server.on("/fan", HTTP_GET, [](AsyncWebServerRequest* r){
+    if (mode!=MODE_MANUAL){ r->send(403,"text/plain","Only in MANUAL"); return; }
+    if (!r->hasParam("ch") || !r->hasParam("on")) { r->send(400,"text/plain","/fan?ch=1..6&on=0|1"); return; }
+    int ch = r->getParam("ch")->value().toInt();
+    bool v = (r->getParam("on")->value().toInt()!=0);
+
+    if (v){
+      if (O.reverse){ r->send(423,"text/plain","Blocked: Reverse active"); return; }
+      if (g_safe.active){ r->send(423,"text/plain","Blocked: SafetyLock active"); return; }
+    }
+
+    const bool beforeAnyOn = anyFansOn();
+
+    switch(ch){
+      case 1: O.f1=v; break; case 2: O.f2=v; break; case 3: O.f3=v; break; case 4: O.f4=v; break;
+#if FEAT_FAN5_6
+      case 5: O.f5=v; break; case 6: O.f6=v; break;
+#endif
+      default: r->send(400,"text/plain","Bad ch"); return;
+    }
+    apply_all();
+
+    if (beforeAnyOn && !anyFansOn()){
+      startSafetyLock(SafetyPhase::POST_FANS, SAFETY_SPINDOWN_MS);
+      r->send(200,"text/plain","OK (POST_FANS 30s)");
+    } else {
+      r->send(200,"text/plain","OK");
+    }
+  });
+
+  // /spray?on=0|1
+  server.on("/spray", HTTP_GET, [](AsyncWebServerRequest* r){
+    if (mode!=MODE_MANUAL){ r->send(403,"text/plain","Only in MANUAL"); return; }
+    if (!r->hasParam("on")) { r->send(400,"text/plain","/spray?on=0|1"); return; }
+    bool v = r->getParam("on")->value().toInt()!=0;
+    if (v && O.reverse){ r->send(409,"text/plain","Blocked: Reverse active"); return; }
+    if (v && g_safe.active){ r->send(409,"text/plain","Blocked: SafetyLock active"); return; }
+    O.spray = v;
+    if (O.spray) { O.reverse=false; cancelSafetyLock(); }
+    apply_all();
+    r->send(200,"text/plain","OK");
+  });
+
+  // /reverse?on=0|1  (MANUAL SafetyLock – PREPARE_REVERSE / POST_REVERSE)
+  server.on("/reverse", HTTP_GET, [](AsyncWebServerRequest* r){
+    if (mode!=MODE_MANUAL){ r->send(403,"text/plain","Only in MANUAL"); return; }
+    if (!r->hasParam("on")) { r->send(400,"text/plain","/reverse?on=0|1"); return; }
+    bool reqOn = r->getParam("on")->value().toInt()!=0;
+
+    if (reqOn){
+      if (O.reverse){ r->send(200,"text/plain","Reverse already ON"); return; }
+      if (g_safe.active){ r->send(423,"text/plain","Blocked: SafetyLock active"); return; }
+      if (O.spray){ r->send(409,"text/plain","Reverse blocked by SPRAY"); return; }
+
+      if (anyFansOn()){
+        O.f1=O.f2=O.f3=O.f4=false;
+#if FEAT_FAN5_6
+        O.f5=O.f6=false;
+#endif
+        apply_all();
+        startSafetyLock(SafetyPhase::PREPARE_REVERSE, SAFETY_SPINDOWN_MS);
+        r->send(200,"text/plain","Reverse scheduled (after 30s)");
+        LOG(3,"[SAFE] Fans off, scheduling Reverse ON");
+      } else {
+        O.reverse = true;
+        apply_all();
+        r->send(200,"text/plain","Reverse ON");
+        LOG(3,"[SAFE] Reverse ON immediately (fans were off)");
+      }
+    } else {
+      if (!O.reverse){ r->send(200,"text/plain","Reverse already OFF"); return; }
+      O.reverse = false;
+      apply_all();
+      startSafetyLock(SafetyPhase::POST_REVERSE, SAFETY_SPINDOWN_MS);
+      r->send(200,"text/plain","Reverse OFF, fans blocked for 30s");
+      LOG(3,"[SAFE] Reverse OFF -> POST_REVERSE lock");
+    }
+  });
+
+  // UNLOCK: LOCKOUT i SafetyLock
+  server.on("/unlock", HTTP_GET, [](AsyncWebServerRequest* r){
+    if (is_lockout()){
+      clearOutputs(); O.alarm = false; mode = MODE_AUTO; apply_all();
+      r->send(200,"text/plain","Unlocked LOCKOUT");
+      LOG(2, "[LOCKOUT] Cleared by /unlock");
+      return;
+    }
+    if (g_safe.active){
+      cancelSafetyLock();
+      r->send(200,"text/plain","SafetyLock cancelled");
+      return;
+    }
+    r->send(200,"text/plain","Nothing to unlock");
+  });
+
+  // Factory reset
+  server.on("/factoryreset", HTTP_GET, [](AsyncWebServerRequest* r){
+    factory_reset();
+    r->send(200,"text/plain","Factory defaults scheduled");
+  });
+
+  server.begin();
+
+#if FEAT_LCD
+  lcd.setCursor(8,32); lcd.print("Ready.");
+#endif
+}
+
+void loop(){
+  esp_task_wdt_reset();
+
+  sensors_read();
+  pm_read_rms();
+  readFanCurrents();
+
+#if FEAT_VMON
+  vmon_read_rms();
+#endif
+
+  checkFanCurrent();
+
+  uint32_t now = millis();
+  if (now - lastServiceTick >= 60000UL) {
+    lastServiceTick = now;
+    if (O.f1||O.f2||O.f3||O.f4
+#if FEAT_FAN5_6
+      || O.f5 || O.f6
+#endif
+      || O.spray) {
+      cfg.ServiceMinutes++;
+      eeprom_dirty = true;
+    }
+  }
+
+  if (g_safe.active){
+    int32_t diff = (int32_t)(g_safe.untilMs - now);
+    if (diff <= 0){
+      if (g_safe.phase == SafetyPhase::PREPARE_REVERSE){
+        if (!O.spray) {
+          O.reverse = true;
+          apply_all();
+          LOG(3,"[SAFE] Countdown done -> Reverse ON");
+        }
+      }
+      cancelSafetyLock();
+    }
+  }
+
+  switch (mode){
+    case MODE_AUTO:    logic_AUTO();    break;
+    case MODE_SERVICE: logic_SERVICE(); break;
+    case MODE_WIZARD:  logic_WIZARD();  break;
+    case MODE_LOCKOUT: apply_all();     break;
+    case MODE_MANUAL:  apply_all();     break;
+  }
+
+#if FEAT_LCD
+  if (millis()-lastLCD > 800){ lcd_main(); lastLCD=millis(); }
+#endif
+
+  if (millis()-lastLog > 60000){ logCSV(); lastLog=millis(); }
+
+  if (eeprom_dirty && (millis() - last_commit >= COMMIT_PERIOD_MS)) {
+    EEPROM.commit();
+    eeprom_dirty = false;
+    last_commit = millis();
+    LOG(3, "[EEPROM] commit");
+  }
+}
 
