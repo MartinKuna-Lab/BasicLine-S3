@@ -1,55 +1,57 @@
 /*******************************************************
- *  Project:  BasicLine S3 — Industrial Control System
- *  Version:  v1.3.9 FULL (STABLE BUILD 2025-11-05)
+ *  Project:  BasicLine S3 — Industrial Controller
+ *  Version:  v1.3.9 FULL STABLE (build 2025-11-05)
  *  Platform: ESP32-S3 DevKit / LilyGO T-Relay S3 v1.1
  *  Author:   Martin Kuna / OptiTherm Division
  *
  *  🔧 SYSTEM OVERVIEW
- *  • Kompletní řídicí systém chlazení a reverzace pro průmyslové kompresory  
+ *  • Řídicí systém pro průmyslové chlazení kompresorů (BasicLine S3 platforma)
  *  • 4 hlavní ventilátory + 1 reverzní + 1 spray ventil  
- *  • Režimy: AUTO / MANUAL / SERVICE / LOCKOUT / WIZARD  
- *  • I²C CHAIN expander pro rozšíření výstupů (UL/AL)  
- *  • SafetyLock automaticky zajišťuje prodlevy a blokace:
- *      – PREPARE_REVERSE : 30 s po vypnutí ventilátorů před reverzem  
- *      – POST_REVERSE   : 30 s po vypnutí reverzu (ventilátory blokovány)  
- *      – POST_FANS      : 30 s po ručním vypnutí všech ventilátorů  
- *  • Automatická rotace ventilátorů každou 1 h (rovnoměrné zatížení)
+ *  • Automatický / Servisní / Manuální režim  
+ *  • I²C CHAIN expander pro rozšíření výstupů  
+ *  • SafetyLock – bezpečnostní prodlevy pro reverzní chod:  
+ *     – PREPARE_REVERSE  = 30 s po vypnutí ventilátorů  
+ *     – POST_REVERSE      = 30 s po vypnutí reverzu  
+ *     – POST_FANS          = 30 s po ručním vypnutí všech ventilátorů  
+ *  • Automatická rotace ventilátorů (1 h interval)
  *
- *  💾 DATA & SENSORS
- *  • 3× DS18B20 teplotní senzory (Tin, Tout, Tamb)  
- *  • ACS712-20A — měření agregovaného proudu ventilátorů  
- *  • ZMPT110B — měření napětí L1/L2/L3 (3f diagnostika)  
- *  • RTC DS3231 — časová značka pro logování na SD kartu  
- *  • EEPROM — uložení konfigurace a počítadla servisních minut  
- *  • SD karta — CSV log + error log v reálném čase
+ *  💾 SENSORS & DATA ACQUISITION
+ *  • 3 × DS18B20 – měření Tin, Tout, Tamb  
+ *  • ACS712-20A – měření agregovaného proudu ventilátorů  
+ *  • ZMPT110B × 3 – měření napětí L1/L2/L3 (+ U_AVG)  
+ *  • RTC DS3231 – časová značka logu  
+ *  • SD karta – CSV logování všech parametrů + error log  
+ *  • EEPROM – teplotní nastavení + počítadlo servisních minut
  *
- *  📶 WEB INTERFACE (AsyncWebServer)
- *  • Moderní grafické WebUI v režimu AP (SSID BasicLine_S3)  
- *  • Živá data: Tin, Tout, Tamb, Eff, I_RMS, PWR, U_L1/L2/L3/AVG  
- *  • Grafy (canvas) v reálném čase — Eff, Teploty, I_RMS, PWR, U_*  
- *  • Ruční ovládání FAN, SPRAY a REVERSE v MANUAL režimu  
+ *  📶 WEB INTERFACE (ESPAsyncWebServer)
+ *  • Elegantní WebUI v dark stylu + SVG rotující ventilátor v hlavičce  
+ *  • Režimy: AUTO / MANUAL  +  ruční ovládání FAN, SPRAY, REVERSE  
+ *  • Zobrazení aktuálních hodnot: Tin, Tout, Tamb, Eff, I_RMS, PWR, U_AVG  
  *  • Konfigurační panel (Settings): T_ON, T_OFF, T_SPRAY, HYST, Power Monitor  
- *  • Status bannery: SafetyLock (časový odpočet) + LOCKOUT varování  
- *  • Elegantní SVG logo rotujícího ventilátoru + kompaktní dark design
+ *  • Indikace SafetyLock s odpočtem a LOCKOUT stavu  
+ *  • 9 grafů (canvas): Eff, Tin, Tout, Tamb, I_RMS, PWR, U_L1, U_L2, U_L3 (+ U_AVG)  
+ *  • Moderní asynchronní obnova dat (1 Hz bez reloadu)
  *
  *  🖥️ LCD INTERFACE (LovyanGFX / ST7789)
- *  • Banner: "BasicLine S3 — Industrial Control"  
- *  • Zobrazuje: Mode, Tin, Tout, Tamb, dT/dt, Eff, I_RMS, PWR, U_L1-L3  
- *  • Ikonový řádek výstupů F1–F4, SP, RV, UL, AL  
- *  • Barevné indikace stavů a reverzní hlášení (REVERSE ACTIVE)
+ *  • Horní banner: "BasicLine S3 — Industrial Control"  
+ *  • Zobrazení všech hlavních hodnot a ikony výstupů F1–F4, SP, RV, UL, AL  
+ *  • Jednoduchý layout s vysokou čitelností a nízkým zatížením CPU
  *
- *  ⚙️ LOGIKA & DIAGNOSTIKA
- *  • Detekce poruchy ventilátorů (LOW / OVERLOAD přes ACS712)  
- *  • Servisní počítadlo motohodin ventilátorů (ServiceMinutes)  
- *  • Watchdog (10 s) – zaručená stabilita běhu ESP32-S3  
- *  • Factory Reset / Unlock LOCKOUT / ruční vypnutí SafetyLock  
- *  • EEPROM commit každých 10 s pro minimální opotřebení
+ *  ⚙️ LOGIKA A DIAGNOSTIKA
+ *  • Automatická řízení otáček a stupňování ventilátorů podle Tout  
+ *  • Ochrana proti přetížení a nečinnosti ventilátorů (ACS diagnostika)  
+ *  • Servisní počítadlo – inkrement při běhu fanů / spraye  
+ *  • Automatický reverzní pulz po startu kompresoru  
+ *  • Watchdog (10 s) – zajištěn reset při zablokování úloh  
+ *  • Plná podpora SafetyLock a ručního odblokování přes WebUI
  *
- *  ✅ STAV
- *  • Verze v1.3.9 FULL je plně stabilní a ověřená na HW T-Relay S3 v1.1  
- *  • Funguje s plnou grafickou WebUI i LCD indikací  
- *  • Označena jako „STABLE PUBLIC BUILD“ pro zveřejnění a dokumentaci
+ *  ✅ STAV VERZE
+ *  • BasicLine S3 v1.3.9 FULL = Stabilní produkční release  
+ *  • Testováno na T-Relay S3 rev 1.1 (ESP32-S3 N16R8)  
+ *  • Stabilní běh WebUI i LCD současně, bez zamrznutí  
+ *  • Plně kompatibilní s BasicLine S3 dokumentací v1.3.x
  *******************************************************/
+
 
 
 #include <Arduino.h>
