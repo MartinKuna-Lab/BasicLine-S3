@@ -1,2 +1,4 @@
 # BasicLine-S3
-BasicLine S3 is an ESP32-S3 based intelligent controller for cooling and heat-exchange systems. It manages multi-fan PWM control, monitors temperature and pressure sensors, and ensures efficient, reliable thermal management with built-in diagnostics and Modbus-TCP support.
+BasicLine S3 is a modular ESP32-S3 based industrial controller designed for intelligent management of cooling, ventilation, and thermal-exchange systems.
+It supports multi-fan PWM control, temperature and pressure monitoring, and relay-based power management using the LilyGO T-Relay S3 board.
+The firmware integrates diagnostics, web-based UI, OTA updates, and Modbus-TCP communication, providing a flexible and reliable platform for automation and process control.
