@@ -1,0 +1,3 @@
+BasicLine S3 je modulární průmyslová řídicí jednotka založená na ESP32-S3, určená pro inteligentní řízení ventilátorů, chladicích a tepelných systémů.
+Podporuje ovládání více ventilátorů přes výkonová relé, sledování teploty a tlaku a rozšířenou bezpečnostní logiku včetně manuálního a automatického reverzu.
+Firmware obsahuje diagnostiku, moderní webové rozhraní, OTA aktualizace a Modbus-TCP komunikaci, čímž tvoří univerzální a spolehlivou platformu pro automatizaci a řízení procesů.
