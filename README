@@ -1,0 +1,3 @@
+BasicLine S3 is a modular ESP32-S3 based industrial controller designed for intelligent management of cooling fans, ventilation systems, and heat-exchange processes.
+It supports multi-fan control via power relays, temperature and pressure monitoring, and advanced safety interlocks including manual and automatic reverse modes.
+The firmware integrates diagnostics, an elegant WebUI, OTA updates, and Modbus-TCP communication, providing a flexible and reliable platform for automation and process control.
